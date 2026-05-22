@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react';
 import {
+  Activity,
   BarChart3,
   Bot,
   CalendarDays,
@@ -11,6 +12,7 @@ import {
   Palette,
   Search,
   Settings as SettingsIcon,
+  ShieldCheck,
   Sparkles,
   User,
   UserCircle,
@@ -22,8 +24,20 @@ import type {
   AppSettings,
   BotProvider,
   BotReadinessState,
+  CapabilityId,
+  CapabilityReadinessState,
+  CapabilitySnapshot,
+  CapabilitySnapshotCollection,
+  HealthSignal,
+  HealthSignalLayer,
+  HealthSignalStatus,
+  HealthSnapshot,
   LlmConnection,
   NetworkProxySettings,
+  OsPermissionId,
+  OsPermissionSnapshot,
+  OsPermissionState,
+  PermissionSnapshot,
   PersonalizationSettingsWarning,
   SettingsSection,
   ThemePreference,
@@ -33,6 +47,7 @@ import type {
   UsageStats,
 } from '@maka/core';
 import type { TestProxyInput } from '@maka/core/settings/network-settings';
+import { HEALTH_SIGNAL_LAYERS, OS_PERMISSION_IDS } from '@maka/core';
 import { BOT_PROVIDERS, createDefaultSettings } from '@maka/core/settings';
 import { useModalA11y, useToast } from '@maka/ui';
 import { ProvidersPanel } from './ProvidersPanel';
@@ -76,6 +91,8 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
   { id: 'data', label: '数据', Icon: Database, enabled: true, group: '数据与账号' },
   { id: 'account', label: '账号', Icon: UserCircle, enabled: true, group: '数据与账号' },
   // Group 5: 其他
+  { id: 'permissions', label: '权限与能力', Icon: ShieldCheck, enabled: true, group: '其他' },
+  { id: 'health', label: '健康', Icon: Activity, enabled: true, group: '其他' },
   { id: 'about', label: '关于', Icon: Info, enabled: true, group: '其他' },
 ];
 
@@ -579,6 +596,10 @@ function SettingsPage(props: {
           onRefresh={props.onRefreshConnections}
         />
       );
+    case 'permissions':
+      return <PermissionCenterPage />;
+    case 'health':
+      return <HealthCenterPage />;
     default: {
       const copy = COMING_SOON_PAGES[props.section];
       if (copy) {
@@ -1603,6 +1624,570 @@ function Switch(props: { checked: boolean; onChange(checked: boolean): void }) {
       <span />
     </button>
   );
+}
+
+/**
+ * PR-UI-8 — Permission Center stub. Consumes `window.maka.permissions.getSnapshot()`
+ * and `window.maka.capabilities.getSnapshot()` (both shipped by @xuan PR-REAL-2).
+ *
+ * Stage 1 Hard Gate contract:
+ * - Renders the live snapshot per capability with explicit four-layer breakdown
+ *   (OS permission · feature toggle · action approval · memory acceptance), so
+ *   the user can see WHY each capability lands on its readiness state.
+ * - Surfaces every OS permission separately at the bottom so users can verify
+ *   the underlying TCC state without re-deriving it from capabilities.
+ * - **Read-only by design.** @xuan/@kenji review (2026-05-22): the UI must
+ *   NOT pretend to revoke OS TCC or guide the user through grant flows here;
+ *   that lands in PR-CU-0 / PR-CU-1 once the drag-`.app` helper exists.
+ * - Audit hint slot is reserved (`auditEvents` is empty for now) — once
+ *   PR-REAL-3 wires the audit log, the slot fills without UI change.
+ */
+const CAPABILITY_READINESS_COPY: Record<CapabilityReadinessState, { label: string; detail: string; tone: 'neutral' | 'info' | 'success' | 'warning' | 'destructive' }> = {
+  not_configured: { label: '未配置', detail: '需要先打开开关或完成配置才能启用。', tone: 'neutral' },
+  denied: { label: '系统拒绝', detail: '所需系统权限被拒绝或当前平台不支持。', tone: 'destructive' },
+  enabled: { label: '运行可用', detail: '配置、权限、运行态探测都已通过。', tone: 'success' },
+  degraded: { label: '运行降级', detail: '之前可用，但最近的运行态探测失败。', tone: 'warning' },
+  paused: { label: '已暂停', detail: '功能开关被显式关闭，但配置仍保留。', tone: 'info' },
+};
+
+const OS_PERMISSION_COPY: Record<OsPermissionId, { label: string; purpose: string }> = {
+  accessibility: { label: '辅助功能', purpose: 'Computer Use 需要它来读取窗口焦点 / 模拟键盘鼠标。' },
+  screen_recording: { label: '屏幕录制', purpose: 'Computer Use 与 Activity Recorder 需要它来读取窗口内容。' },
+  microphone: { label: '麦克风', purpose: 'Voice 通道需要它来采集语音输入。' },
+  notifications: { label: '通知', purpose: '权限申请、回顾完成等系统通知需要它。' },
+  automation: { label: '自动化（Apple Events）', purpose: 'Computer Use 控制其他 App 需要逐 target 授权。' },
+};
+
+const OS_PERMISSION_STATE_COPY: Record<OsPermissionState, { label: string; tone: 'neutral' | 'info' | 'success' | 'warning' | 'destructive' }> = {
+  unsupported: { label: '当前平台不支持', tone: 'neutral' },
+  unknown: { label: '无法读取状态', tone: 'neutral' },
+  not_determined: { label: '尚未授权', tone: 'warning' },
+  denied: { label: '已拒绝', tone: 'destructive' },
+  granted: { label: '已授权', tone: 'success' },
+};
+
+function PermissionCenterPage() {
+  const [permissions, setPermissions] = useState<PermissionSnapshot | null>(null);
+  const [capabilities, setCapabilities] = useState<CapabilitySnapshotCollection | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [refreshTick, setRefreshTick] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    Promise.all([
+      window.maka.permissions.getSnapshot(),
+      window.maka.capabilities.getSnapshot(),
+    ])
+      .then(([perm, caps]) => {
+        if (cancelled) return;
+        setPermissions(perm);
+        setCapabilities(caps);
+        setLoading(false);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : '读取权限快照失败');
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshTick]);
+
+  if (loading) {
+    return (
+      <div className="maka-skeleton-stack" aria-busy="true" aria-label="正在加载权限快照">
+        <div className="maka-skeleton maka-skeleton-line" data-size="lg" style={{ width: '38%' }} />
+        <div className="maka-skeleton maka-skeleton-line" style={{ width: '72%' }} />
+        <div className="maka-skeleton maka-skeleton-line" style={{ width: '60%' }} />
+        <div className="maka-skeleton maka-skeleton-line" style={{ width: '80%' }} />
+      </div>
+    );
+  }
+
+  if (error || !permissions || !capabilities) {
+    return (
+      <div className="settingsPermissionPage">
+        <div className="settingsPermissionError" role="alert">
+          <strong>无法读取权限快照</strong>
+          <small>{error ?? '权限服务未返回数据。'}</small>
+          <button type="button" className="maka-button" onClick={() => setRefreshTick((tick) => tick + 1)}>
+            重新读取
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const checkedAtLabel = new Date(capabilities.checkedAt).toLocaleString();
+
+  return (
+    <div className="settingsPermissionPage">
+      <header className="settingsPermissionIntro">
+        <div>
+          <h3>权限与能力中心</h3>
+          <p>
+            这里只读取系统权限与功能能力的当前快照，不会代替你修改任何 OS 权限。
+            撤销与引导流程会在原生 helper 上线后单独提供。
+          </p>
+        </div>
+        <div className="settingsPermissionMeta">
+          <span className="pill" data-tone="info">只读快照</span>
+          <small>最近一次读取：{checkedAtLabel}</small>
+          <button
+            type="button"
+            className="settingsPermissionRefresh"
+            onClick={() => setRefreshTick((tick) => tick + 1)}
+          >
+            刷新
+          </button>
+        </div>
+      </header>
+
+      <section aria-label="功能能力" className="settingsPermissionSection">
+        <header>
+          <h4>功能能力</h4>
+          <small>每个能力的就绪状态由「功能开关 · 配置 · 系统权限 · 运行态探测」共同决定。</small>
+        </header>
+        <ul className="settingsCapabilityList">
+          {capabilities.capabilities.map((capability) => (
+            <CapabilityRow key={capability.id} capability={capability} />
+          ))}
+        </ul>
+      </section>
+
+      <section aria-label="系统权限" className="settingsPermissionSection">
+        <header>
+          <h4>系统权限</h4>
+          <small>Maka 读到的 OS 级权限状态。撤销请前往「系统设置 → 隐私与安全性」。</small>
+        </header>
+        <ul className="settingsOsPermissionList">
+          {OS_PERMISSION_IDS.map((id) => (
+            <OsPermissionRow key={id} snapshot={permissions.permissions[id]} />
+          ))}
+        </ul>
+      </section>
+
+      <p className="settingsPermissionFootnote">
+        想要新增「拖拽 .app 完成 Accessibility 授权」「逐 target 申请 Automation」「Screen Recording 引导」等真正能修改 OS 权限的流程？
+        正在 PR-CU-0 / PR-CU-1（Computer Use 原生 helper）路上，落地后会替换这里的只读视图。
+      </p>
+    </div>
+  );
+}
+
+function CapabilityRow(props: { capability: CapabilitySnapshot }) {
+  const { capability } = props;
+  const readinessCopy = CAPABILITY_READINESS_COPY[capability.readiness];
+  return (
+    <li className="settingsCapabilityRow" data-readiness={capability.readiness}>
+      <div className="settingsCapabilityHeader">
+        <div className="settingsCapabilityHeading">
+          <strong>{capability.label}</strong>
+          <small className="settingsCapabilityId">{prettyCapabilityId(capability.id)}</small>
+        </div>
+        <span className="pill" data-tone={readinessCopy.tone}>{readinessCopy.label}</span>
+      </div>
+      <p className="settingsCapabilityDetail">{readinessCopy.detail}</p>
+      <dl className="settingsCapabilityLayers">
+        <div>
+          <dt>功能开关</dt>
+          <dd data-tone={featureTone(capability.feature.state)}>
+            {featureLabel(capability.feature.state)}
+            {capability.feature.reason && <small>{capability.feature.reason}</small>}
+          </dd>
+        </div>
+        <div>
+          <dt>配置</dt>
+          <dd data-tone={configurationTone(capability.configuration.state)}>
+            {configurationLabel(capability.configuration.state)}
+            {capability.configuration.reason && <small>{capability.configuration.reason}</small>}
+          </dd>
+        </div>
+        <div>
+          <dt>操作审批</dt>
+          <dd data-tone={actionApprovalTone(capability.actionApproval.state)}>
+            {actionApprovalLabel(capability.actionApproval.state)}
+          </dd>
+        </div>
+        <div>
+          <dt>记忆写入</dt>
+          <dd data-tone={memoryAcceptanceTone(capability.memoryAcceptance.state)}>
+            {memoryAcceptanceLabel(capability.memoryAcceptance.state)}
+          </dd>
+        </div>
+        <div>
+          <dt>运行态探测</dt>
+          <dd data-tone={runtimeProbeTone(capability.runtimeProbe.state)}>
+            {runtimeProbeLabel(capability.runtimeProbe.state)}
+            {capability.runtimeProbe.reason && <small>{capability.runtimeProbe.reason}</small>}
+          </dd>
+        </div>
+      </dl>
+      {capability.osPermissions.length > 0 && (
+        <div className="settingsCapabilityOsPermissions">
+          <span>所需系统权限</span>
+          <ul>
+            {capability.osPermissions.map((req) => (
+              <li key={req.id}>
+                <span>{OS_PERMISSION_COPY[req.id]?.label ?? req.id}</span>
+                <em data-tone={OS_PERMISSION_STATE_COPY[req.status].tone}>
+                  {OS_PERMISSION_STATE_COPY[req.status].label}
+                </em>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {(capability.canRevoke || capability.canPause) && (
+        <div className="settingsCapabilityActionHints" aria-label="未来可用的操作">
+          {capability.canPause && (
+            <span className="settingsCapabilityActionHint" data-disabled="true" title="操作入口等 PR-CU-0/1 typed action IPC 接入后可用">
+              可暂停 · 即将可用
+            </span>
+          )}
+          {capability.canRevoke && (
+            <span className="settingsCapabilityActionHint" data-disabled="true" title="操作入口等 PR-CU-0/1 typed action IPC 接入后可用">
+              可撤销 · 即将可用
+            </span>
+          )}
+        </div>
+      )}
+      <div className="settingsCapabilityAuditSlot" aria-hidden={capability.auditEvents.length === 0}>
+        {capability.auditEvents.length === 0 ? (
+          <small>审计日志将在 PR-REAL-3 接入后显示。</small>
+        ) : (
+          <ul>
+            {capability.auditEvents.slice(-3).map((event, index) => (
+              <li key={`${capability.id}-audit-${index}`}>{event}</li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </li>
+  );
+}
+
+function OsPermissionRow(props: { snapshot: OsPermissionSnapshot }) {
+  const { snapshot } = props;
+  const copy = OS_PERMISSION_COPY[snapshot.id] ?? { label: snapshot.id, purpose: '' };
+  const stateCopy = OS_PERMISSION_STATE_COPY[snapshot.status];
+  return (
+    <li className="settingsOsPermissionRow" data-state={snapshot.status}>
+      <div>
+        <strong>{copy.label}</strong>
+        <small>{copy.purpose}</small>
+        {snapshot.reason && <small className="settingsOsPermissionReason">{snapshot.reason}</small>}
+      </div>
+      <span className="pill" data-tone={stateCopy.tone}>{stateCopy.label}</span>
+    </li>
+  );
+}
+
+function prettyCapabilityId(id: CapabilityId): string {
+  return id;
+}
+
+function featureLabel(state: CapabilitySnapshot['feature']['state']): string {
+  switch (state) {
+    case 'enabled': return '已开启';
+    case 'disabled': return '已关闭';
+    case 'not_available': return '尚未实现';
+  }
+}
+function featureTone(state: CapabilitySnapshot['feature']['state']): 'neutral' | 'info' | 'success' | 'warning' | 'destructive' {
+  if (state === 'enabled') return 'success';
+  if (state === 'disabled') return 'info';
+  return 'neutral';
+}
+
+function configurationLabel(state: CapabilitySnapshot['configuration']['state']): string {
+  switch (state) {
+    case 'not_required': return '不需要配置';
+    case 'missing': return '缺少必要配置';
+    case 'present': return '已填写';
+  }
+}
+function configurationTone(state: CapabilitySnapshot['configuration']['state']): 'neutral' | 'info' | 'success' | 'warning' | 'destructive' {
+  if (state === 'present') return 'success';
+  if (state === 'missing') return 'warning';
+  return 'neutral';
+}
+
+function actionApprovalLabel(state: CapabilitySnapshot['actionApproval']['state']): string {
+  switch (state) {
+    case 'not_required': return '不需要审批';
+    case 'required_per_action': return '每次调用都需审批';
+    case 'pending': return '审批挂起';
+    case 'approved': return '当前会话已批准';
+    case 'denied': return '当前会话已拒绝';
+  }
+}
+function actionApprovalTone(state: CapabilitySnapshot['actionApproval']['state']): 'neutral' | 'info' | 'success' | 'warning' | 'destructive' {
+  if (state === 'approved') return 'success';
+  if (state === 'denied') return 'destructive';
+  if (state === 'pending') return 'warning';
+  if (state === 'required_per_action') return 'info';
+  return 'neutral';
+}
+
+function memoryAcceptanceLabel(state: CapabilitySnapshot['memoryAcceptance']['state']): string {
+  switch (state) {
+    case 'not_applicable': return '不涉及记忆写入';
+    case 'disabled': return '记忆写入已关闭';
+    case 'draft_required': return '需要先草拟 memory 协议';
+    case 'accepted': return '记忆写入已接受';
+  }
+}
+function memoryAcceptanceTone(state: CapabilitySnapshot['memoryAcceptance']['state']): 'neutral' | 'info' | 'success' | 'warning' | 'destructive' {
+  if (state === 'accepted') return 'success';
+  if (state === 'draft_required') return 'warning';
+  return 'neutral';
+}
+
+function runtimeProbeLabel(state: CapabilitySnapshot['runtimeProbe']['state']): string {
+  switch (state) {
+    case 'not_available': return '尚无运行态探测';
+    case 'not_run': return '探测未运行';
+    case 'healthy': return '探测通过';
+    case 'degraded': return '探测降级';
+  }
+}
+function runtimeProbeTone(state: CapabilitySnapshot['runtimeProbe']['state']): 'neutral' | 'info' | 'success' | 'warning' | 'destructive' {
+  if (state === 'healthy') return 'success';
+  if (state === 'degraded') return 'destructive';
+  if (state === 'not_run') return 'warning';
+  return 'neutral';
+}
+
+/**
+ * PR-UI-9 — Health Center stub. Consumes `window.maka.health.getSnapshot()`
+ * (shipped by @xuan PR-HC-1).
+ *
+ * Hard contract (per @xuan): "validation/config/permission/runtime 别聚成
+ * 一个绿点". The UI groups signals by `layer` and renders each in its own
+ * section so the user sees WHICH layer is okay and WHICH is degraded.
+ *
+ * Status semantics ≠ tone-by-color only. `ok` (validation pass) on an LLM
+ * connection does NOT promote it to operational — that requires a runtime
+ * probe in PR-REAL-4. The detail copy below makes the distinction explicit.
+ *
+ * Read-only stub: no test buttons, no repair flows. Test/repair entries
+ * will be wired in PR-HC-2 once typed actions are exposed.
+ */
+const HEALTH_LAYER_COPY: Record<HealthSignalLayer, { label: string; description: string }> = {
+  configuration: { label: '配置', description: '是否填齐了 settings 里的必填项。' },
+  validation: { label: '验证', description: '凭据 / 端点的连通性测试结果，仅代表 validation 通过，不等于 agent 通路可用。' },
+  permission: { label: '系统权限', description: '所需 OS / TCC 权限是否已授权。' },
+  feature: { label: '功能开关', description: '功能是否被显式启用、是否已实现。' },
+  action_approval: { label: '操作审批', description: '每次工具调用 / 高危操作的审批策略状态。' },
+  memory_acceptance: { label: '记忆写入', description: '是否接受了 memory contract、是否启用了记忆写入。' },
+  runtime_probe: { label: '运行态探测', description: '最近一次真实运行（发送 / 流式 / 收发 smoke）的探测结果。' },
+  storage: { label: '存储', description: '工作区文件、JSONL、SQLite 等本地存储健康度。' },
+};
+
+const HEALTH_STATUS_COPY: Record<HealthSignalStatus, { label: string; tone: 'neutral' | 'info' | 'success' | 'warning' | 'destructive' }> = {
+  ok: { label: '正常', tone: 'success' },
+  info: { label: '提示', tone: 'info' },
+  warning: { label: '警告', tone: 'warning' },
+  error: { label: '错误', tone: 'destructive' },
+  unknown: { label: '未知', tone: 'neutral' },
+};
+
+const HEALTH_SCOPE_LABEL: Record<HealthSignal['scope'], string> = {
+  app: '应用',
+  llm_connection: 'LLM 连接',
+  bot: '机器人',
+  capability: '能力',
+  storage: '存储',
+};
+
+function HealthCenterPage() {
+  const [snapshot, setSnapshot] = useState<HealthSnapshot | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [refreshTick, setRefreshTick] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    window.maka.health
+      .getSnapshot()
+      .then((next) => {
+        if (cancelled) return;
+        setSnapshot(next);
+        setLoading(false);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : '读取健康快照失败');
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshTick]);
+
+  if (loading) {
+    return (
+      <div className="maka-skeleton-stack" aria-busy="true" aria-label="正在加载健康快照">
+        <div className="maka-skeleton maka-skeleton-line" data-size="lg" style={{ width: '38%' }} />
+        <div className="maka-skeleton maka-skeleton-line" style={{ width: '72%' }} />
+        <div className="maka-skeleton maka-skeleton-line" style={{ width: '60%' }} />
+        <div className="maka-skeleton maka-skeleton-line" style={{ width: '80%' }} />
+      </div>
+    );
+  }
+
+  if (error || !snapshot) {
+    return (
+      <div className="settingsHealthPage">
+        <div className="settingsHealthError" role="alert">
+          <strong>无法读取健康快照</strong>
+          <small>{error ?? '健康服务未返回数据。'}</small>
+          <button type="button" className="maka-button" onClick={() => setRefreshTick((tick) => tick + 1)}>
+            重新读取
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const checkedAtLabel = new Date(snapshot.checkedAt).toLocaleString();
+  const signalsByLayer = groupSignalsByLayer(snapshot.signals);
+  const blocksSendCount = snapshot.signals.filter((signal) => signal.blocksSend).length;
+  const blocksCapabilityCount = snapshot.signals.filter((signal) => signal.blocksCapability).length;
+
+  return (
+    <div className="settingsHealthPage">
+      <header className="settingsHealthIntro">
+        <div>
+          <h3>健康中心</h3>
+          <p>
+            按层级（配置 · 验证 · 权限 · 功能 · 操作审批 · 记忆 · 运行态 · 存储）展示当前快照。
+            <strong>验证通过 ≠ 运行可用</strong> — 凭据测试只属于 validation 层，运行态需要 PR-REAL-4 接入实测探测。
+          </p>
+        </div>
+        <div className="settingsHealthMeta">
+          <span className="pill" data-tone="info">只读快照</span>
+          <small>最近一次读取：{checkedAtLabel}</small>
+          <button
+            type="button"
+            className="settingsHealthRefresh"
+            onClick={() => setRefreshTick((tick) => tick + 1)}
+          >
+            刷新
+          </button>
+        </div>
+      </header>
+
+      <section aria-label="健康摘要" className="settingsHealthSummary">
+        <HealthSummaryTile tone="success" label="正常" count={snapshot.summary.ok} />
+        <HealthSummaryTile tone="info" label="提示" count={snapshot.summary.info} />
+        <HealthSummaryTile tone="warning" label="警告" count={snapshot.summary.warning} />
+        <HealthSummaryTile tone="destructive" label="错误" count={snapshot.summary.error} />
+        <HealthSummaryTile tone="neutral" label="未知" count={snapshot.summary.unknown} />
+      </section>
+
+      {(blocksSendCount > 0 || blocksCapabilityCount > 0) && (
+        <div className="settingsHealthBlockers" role="status">
+          {blocksSendCount > 0 && (
+            <span className="pill" data-tone="destructive">
+              {blocksSendCount} 条 signal 会阻塞发送
+            </span>
+          )}
+          {blocksCapabilityCount > 0 && (
+            <span className="pill" data-tone="warning">
+              {blocksCapabilityCount} 条 signal 会阻塞 capability
+            </span>
+          )}
+        </div>
+      )}
+
+      {HEALTH_SIGNAL_LAYERS.map((layer) => {
+        const signals = signalsByLayer[layer];
+        if (!signals || signals.length === 0) return null;
+        const copy = HEALTH_LAYER_COPY[layer];
+        return (
+          <section key={layer} className="settingsHealthLayer" aria-label={`${copy.label} signals`}>
+            <header>
+              <h4>{copy.label}</h4>
+              <small>{copy.description}</small>
+            </header>
+            <ul className="settingsHealthSignalList">
+              {signals.map((signal) => (
+                <HealthSignalRow key={signal.id} signal={signal} />
+              ))}
+            </ul>
+          </section>
+        );
+      })}
+
+      <p className="settingsHealthFootnote">
+        想要从这里直接「测试连接」「重新探测」「修复凭据」？操作入口等 PR-HC-2 typed action IPC 接入后可用。
+        所有真正的运行态探测（PR-REAL-4 ToolOutputDelta + send/stream/abort smoke）落地后会自动出现在「运行态探测」层。
+      </p>
+    </div>
+  );
+}
+
+function HealthSummaryTile(props: {
+  tone: 'neutral' | 'info' | 'success' | 'warning' | 'destructive';
+  label: string;
+  count: number;
+}) {
+  return (
+    <div className="settingsHealthSummaryTile" data-tone={props.tone} data-empty={props.count === 0}>
+      <strong>{props.count}</strong>
+      <small>{props.label}</small>
+    </div>
+  );
+}
+
+function HealthSignalRow(props: { signal: HealthSignal }) {
+  const { signal } = props;
+  const statusCopy = HEALTH_STATUS_COPY[signal.status];
+  const checkedAtLabel = new Date(signal.checkedAt).toLocaleString();
+  return (
+    <li className="settingsHealthSignalRow" data-status={signal.status}>
+      <div className="settingsHealthSignalHeader">
+        <div className="settingsHealthSignalHeading">
+          <strong>{signal.label}</strong>
+          <small className="settingsHealthSignalScope">{HEALTH_SCOPE_LABEL[signal.scope]}</small>
+        </div>
+        <span className="pill" data-tone={statusCopy.tone}>{statusCopy.label}</span>
+      </div>
+      <p className="settingsHealthSignalMessage">{signal.message}</p>
+      {signal.detail && <small className="settingsHealthSignalDetail">{signal.detail}</small>}
+      <div className="settingsHealthSignalMeta">
+        <span>source: <code>{signal.source}</code></span>
+        <span>checked: {checkedAtLabel}</span>
+        {signal.blocksSend && <span className="settingsHealthSignalBlocker" data-tone="destructive">阻塞发送</span>}
+        {signal.blocksCapability && <span className="settingsHealthSignalBlocker" data-tone="warning">阻塞能力</span>}
+      </div>
+    </li>
+  );
+}
+
+function groupSignalsByLayer(signals: HealthSignal[]): Record<HealthSignalLayer, HealthSignal[]> {
+  const byLayer: Record<HealthSignalLayer, HealthSignal[]> = {
+    configuration: [],
+    validation: [],
+    permission: [],
+    feature: [],
+    action_approval: [],
+    memory_acceptance: [],
+    runtime_probe: [],
+    storage: [],
+  };
+  for (const signal of signals) {
+    byLayer[signal.layer].push(signal);
+  }
+  return byLayer;
 }
 
 function SettingsRows(props: { children: ReactNode }) {
