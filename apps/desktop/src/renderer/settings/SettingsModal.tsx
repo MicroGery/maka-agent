@@ -1576,8 +1576,8 @@ function DataSettingsPage() {
         </button>
       </div>
       <div className="settingsNotice">
-        提示：导出整个 workspace 为 .maka.zip、按 schemaVersion 升级导入备份等
-        能力会在 V0.2 阶段开放。现在可以在 Finder 里直接打包整个目录做手动备份。
+        本机数据保存在工作区。需要备份时先退出 Maka，再复制整个目录；恢复时替换同一路径后重启。
+        API key 使用系统 safeStorage 加密，跨设备恢复后需要重新测试连接。
       </div>
     </div>
   );
@@ -2486,7 +2486,7 @@ function MemorySettingsPage(props: {
       <div className="settingsFormRow">
         <div>
           <strong>模型上下文可读取</strong>
-          <small>默认关闭。开启后才允许后续 prompt 注入读取本地记忆；隐身模式下仍会禁用。</small>
+          <small>默认关闭。开启后才允许发送消息时把本地记忆加入 prompt；隐身模式下仍会禁用。</small>
         </div>
         <Switch
           checked={effective.agentReadEnabled}
@@ -3272,7 +3272,7 @@ function BotChatSettingsPage(props: {
               <input type="password" value={channel.token} onChange={(event) => updateChannel({ token: event.currentTarget.value })} placeholder="Discord 开发者后台的 Bot Token" />
             </label>
             <div className="settingsNotice">
-              Discord 凭据测试会请求 `/users/@me` 验证 token 对应一个真实 Bot 应用。事件接入需要 Discord Gateway 长连接，是独立后续，凭据有效不代表运行可用。
+              Discord 凭据测试会请求 `/users/@me` 验证 token 对应一个真实 Bot 应用；启动监听后会通过 Gateway 接收消息，并用 REST 回复对应频道。
             </div>
           </>
         )}
@@ -3344,9 +3344,9 @@ function BotChatSettingsPage(props: {
           </>
         )}
 
-        {/* PR-BOT-QQ-CREDENTIALS-TEST-0: QQ 官方机器人凭据级配置。`appId` =
+        {/* PR-BOT-QQ-OPERATIONAL-0: QQ 官方机器人运行级配置。`appId` =
             App ID，`appSecret` = Client Secret，跟 WeCom / DingTalk 同语义
-            不另开字段。事件接入需要 QQ Gateway WebSocket，是独立后续。 */}
+            不另开字段。 */}
         {selected === 'qq' && (
           <>
             <label className="settingsField">
@@ -3358,7 +3358,7 @@ function BotChatSettingsPage(props: {
               <input type="password" value={channel.appSecret ?? ''} onChange={(event) => updateChannel({ appSecret: event.currentTarget.value })} placeholder="QQ 开放平台 - 机器人 Client Secret" />
             </label>
             <div className="settingsNotice">
-              QQ 凭据测试会请求 `getAppAccessToken`，验证 App ID + Client Secret 真实存在。事件接入需要 QQ Gateway WebSocket，是独立后续，凭据有效不代表运行可用。
+              QQ 凭据测试会请求 `getAppAccessToken`，验证 App ID + Client Secret；启动监听后会通过 QQ Gateway 接收频道、群和私聊事件，并用 REST 投递回复。
             </div>
           </>
         )}

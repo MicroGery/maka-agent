@@ -40,11 +40,25 @@ describe('Settings coming-soon cleanup contract', () => {
   it('keeps feature status pages product-scoped instead of demo-version or future-roadmap copy', async () => {
     const settings = await readRepo('apps/desktop/src/renderer/settings/SettingsModal.tsx');
 
-    assert.doesNotMatch(settings, /V0\.1|capture smoke|之后会加|后续版本开放/, 'feature status pages must not read like demo-stage roadmap copy');
+    assert.doesNotMatch(settings, /V0\.1|V0\.2|capture smoke|之后会加|后续版本开放|阶段开放/, 'feature status pages must not read like demo-stage roadmap copy');
     assert.match(settings, /本地汇总/, 'Daily Review status badge should describe the shipped local aggregate mode');
     assert.match(settings, /今日 \/ 本周 \/ 本月/, 'Daily Review settings copy must mention the shipped range switcher');
     assert.match(settings, /复制 Markdown 摘要/, 'Daily Review settings copy must mention the shipped Markdown copy action');
     assert.match(settings, /本地自检/, 'Voice status badge should describe the shipped local smoke boundary');
+  });
+
+  it('keeps Data settings backup copy actionable instead of future export/import roadmap copy', async () => {
+    const settings = await readRepo('apps/desktop/src/renderer/settings/SettingsModal.tsx');
+    const dataPage = settings.match(/function DataSettingsPage\(\)[\s\S]*?function PersonalizationSettingsPage/);
+
+    assert.ok(dataPage, 'Data settings page block must exist');
+    assert.match(dataPage![0], /需要备份时先退出 Maka，再复制整个目录/, 'Data settings should give a current manual backup path');
+    assert.match(dataPage![0], /跨设备恢复后需要重新测试连接/, 'Data settings should explain safeStorage restore behavior');
+    assert.doesNotMatch(
+      dataPage![0],
+      /\.maka\.zip|schemaVersion|V0\.2|阶段开放|导入备份/,
+      'Data settings must not advertise future export/import roadmap copy',
+    );
   });
 
   it('keeps planned bot platforms out of the credentials-readiness flow', async () => {
@@ -57,6 +71,20 @@ describe('Settings coming-soon cleanup contract', () => {
     assert.match(settings, /selected === 'wechat'/, 'WeChat needs visible App ID / App Secret credential fields');
     assert.doesNotMatch(settings, /机器人运行时尚未接入|代码中还没有这个平台的运行时|平台运行时尚未接入|运行时未开放|可用运行时|开放前|收发 smoke/, 'planned bot copy must not expose implementation-status placeholder language');
     assert.doesNotMatch(settings, /providerSupport === 'planned'\s*\?\s*\{\s*label: '未接入'/, 'planned bot list tags should use the shared planned copy');
+  });
+
+  it('keeps runtime bot platform copy aligned with shipped receive and send paths', async () => {
+    const settings = await readRepo('apps/desktop/src/renderer/settings/SettingsModal.tsx');
+    const discordBlock = settings.match(/selected === 'discord'[\s\S]*?\n\s*\)\}/)?.[0] ?? '';
+    const qqBlock = settings.match(/selected === 'qq'[\s\S]*?\n\s*\)\}/)?.[0] ?? '';
+
+    assert.match(discordBlock, /启动监听后会通过 Gateway 接收消息，并用 REST 回复对应频道/);
+    assert.match(qqBlock, /启动监听后会通过 QQ Gateway 接收频道、群和私聊事件，并用 REST 投递回复/);
+    assert.doesNotMatch(
+      `${discordBlock}\n${qqBlock}`,
+      /事件接入需要|独立后续|凭据有效不代表运行可用/,
+      'runtime bot detail copy must not describe shipped Gateway bridges as future work',
+    );
   });
 
   it('keeps Permission Center copy scoped to current product boundaries', async () => {
