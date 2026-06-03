@@ -1971,7 +1971,7 @@ function AppShell() {
 
     function onMove(moveEvent: globalThis.PointerEvent) {
       const delta = moveEvent.clientX - startX;
-      setSessionListWidth(clamp(start + delta, 240, 420));
+      setSessionListWidth(clampSessionListWidth(start + delta));
     }
 
     function onUp() {
@@ -2012,7 +2012,7 @@ function AppShell() {
         return;
     }
     event.preventDefault();
-    setSessionListWidth(clamp(next, MIN, MAX));
+    setSessionListWidth(clampSessionListWidth(next));
   }
 
   const hasModalOpen = Boolean(activePermission) || settingsOpen || helpOpen || paletteOpen || searchModalOpen;
@@ -2022,6 +2022,7 @@ function AppShell() {
       <div
         className="app maka-shell-2col"
         aria-hidden={hasModalOpen ? 'true' : undefined}
+        inert={hasModalOpen ? true : undefined}
         data-modal-background-hidden={hasModalOpen ? 'true' : undefined}
         style={{
           '--maka-session-list-width': `${sessionListWidth}px`,
@@ -2687,7 +2688,7 @@ function readNavSelection(): NavSelection {
 
 function readSessionListWidth(): number {
   const stored = Number(localStorage.getItem('maka-chat-list-width-v1'));
-  if (Number.isFinite(stored) && stored > 0) return clamp(stored, 240, 420);
+  if (Number.isFinite(stored) && stored > 0) return clampSessionListWidth(stored);
   return 320;
 }
 
@@ -2736,6 +2737,10 @@ function modelSetupToastCopy(reason: string | undefined, fallback: string): { ti
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function clampSessionListWidth(value: number): number {
+  return Math.round(clamp(value, 240, 420));
 }
 
 function filterSessions(sessions: SessionSummary[], selection: NavSelection): SessionSummary[] {

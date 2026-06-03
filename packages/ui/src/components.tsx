@@ -1,4 +1,4 @@
-import React, { createContext, forwardRef, memo, useContext, useEffect, useImperativeHandle, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type MouseEvent, type ReactNode, type RefObject } from 'react';
+import React, { createContext, forwardRef, memo, useContext, useEffect, useImperativeHandle, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FocusEvent, type FormEvent, type KeyboardEvent, type MouseEvent, type ReactNode, type RefObject } from 'react';
 import {
   AlertOctagon,
   AlertTriangle,
@@ -162,6 +162,7 @@ const MODULE_NAV_LABEL: Record<ModuleNavId, string> = {
 export function useModalA11y(
   containerRef: RefObject<HTMLElement | null>,
   onEscape?: () => void,
+  initialFocusRef?: RefObject<HTMLElement | null>,
 ): void {
   useEffect(() => {
     const container = containerRef.current;
@@ -169,9 +170,12 @@ export function useModalA11y(
 
     const previouslyFocused = document.activeElement as HTMLElement | null;
 
-    const initial = getFocusable(container);
-    if (initial.length > 0) {
-      initial[0]!.focus({ preventScroll: true });
+    const preferredInitial = initialFocusRef?.current;
+    const initial = preferredInitial && container.contains(preferredInitial)
+      ? preferredInitial
+      : getFocusable(container)[0];
+    if (initial) {
+      initial.focus({ preventScroll: true });
     } else {
       if (!container.hasAttribute('tabindex')) container.setAttribute('tabindex', '-1');
       container.focus({ preventScroll: true });
@@ -209,12 +213,13 @@ export function useModalA11y(
       // Defer restoration so any in-flight focus changes (e.g. clicking a
       // button that unmounts the modal) settle before we yank focus back.
       queueMicrotask(() => {
+        if (document.contains(container)) return;
         if (previouslyFocused && document.contains(previouslyFocused)) {
           previouslyFocused.focus?.({ preventScroll: true });
         }
       });
     };
-  }, [containerRef, onEscape]);
+  }, [containerRef, onEscape, initialFocusRef]);
 }
 
 const FOCUSABLE_SELECTOR =
@@ -1823,7 +1828,6 @@ export function SearchModal(props: {
   deps?: SearchModalDeps;
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
-  useModalA11y(dialogRef, props.onClose);
 
   // PR-UX-POLISH-1 commit 5 (kenji `2844f64f` SEARCH gate):
   //   - `query` is local state ONLY (no localStorage / no IPC echo).
@@ -1846,6 +1850,7 @@ export function SearchModal(props: {
   const resultRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const ticketRef = useRef(0);
   const searchThread = props.deps?.searchThread;
+  useModalA11y(dialogRef, props.onClose, inputRef);
 
   // Debounced search: ~180ms after the user stops typing, send the
   // request. Empty query clears state without an IPC roundtrip.
@@ -1873,7 +1878,7 @@ export function SearchModal(props: {
         if (Array.isArray(response)) {
           setResults(response);
           setError(null);
-          setActiveResultIndex(response.length > 0 ? 0 : -1);
+          setActiveResultIndex(-1);
         } else {
           setResults([]);
           setError({ reason: response.reason, message: response.message });
@@ -1895,12 +1900,6 @@ export function SearchModal(props: {
     }, 180);
     return () => window.clearTimeout(handle);
   }, [query, searchThread]);
-
-  // Focus the input on mount so users can type immediately. The
-  // useModalA11y hook handles focus trap + restore on close.
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
 
   useEffect(() => {
     if (activeResultIndex < 0) return;
@@ -2479,7 +2478,9 @@ function SessionRow(props: {
 }) {
   const { session, active, streaming, stale, actions, onSelect } = props;
   const [editing, setEditing] = useState(false);
+  const [actionsVisible, setActionsVisible] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const actionTabIndex = actionsVisible ? 0 : -1;
 
   // Auto-focus + select-all when the row enters edit mode so the user can
   // overwrite the current name without an extra Cmd+A.
@@ -2516,6 +2517,11 @@ function SessionRow(props: {
     actions.onDelete(session.id);
   }
 
+  function handleRowBlur(event: FocusEvent<HTMLDivElement>) {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setActionsVisible(false);
+  }
+
   return (
     <div
       className="maka-list-row"
@@ -2523,6 +2529,13 @@ function SessionRow(props: {
       data-editing={editing}
       data-streaming={streaming ? 'true' : undefined}
       data-stale={stale ? 'true' : undefined}
+      onMouseEnter={() => setActionsVisible(true)}
+      onMouseLeave={(event) => {
+        if (event.currentTarget.contains(document.activeElement)) return;
+        setActionsVisible(false);
+      }}
+      onFocus={() => setActionsVisible(true)}
+      onBlur={handleRowBlur}
     >
       {editing ? (
         <form
@@ -2639,10 +2652,16 @@ function SessionRow(props: {
         </button>
       )}
       {actions && !editing && (
-        <div className="maka-list-row-actions" aria-label="对话操作">
+        <div
+          className="maka-list-row-actions"
+          aria-label="对话操作"
+          aria-hidden={actionsVisible ? undefined : 'true'}
+          data-visible={actionsVisible ? 'true' : undefined}
+        >
           <button
             type="button"
             className="maka-list-row-action"
+            tabIndex={actionTabIndex}
             onClick={(event) => {
               stopPropagation(event);
               actions.onToggleFlag(session.id, !session.isFlagged);
@@ -2658,6 +2677,7 @@ function SessionRow(props: {
           <button
             type="button"
             className="maka-list-row-action"
+            tabIndex={actionTabIndex}
             onClick={startRename}
             aria-label="重命名对话"
             title="重命名（双击行名也可）"
@@ -2667,6 +2687,7 @@ function SessionRow(props: {
           <button
             type="button"
             className="maka-list-row-action"
+            tabIndex={actionTabIndex}
             onClick={(event) => {
               stopPropagation(event);
               session.isArchived
@@ -2683,6 +2704,7 @@ function SessionRow(props: {
           <button
             type="button"
             className="maka-list-row-action maka-list-row-action-danger"
+            tabIndex={actionTabIndex}
             onClick={handleDelete}
             aria-label="删除对话"
             title="删除"
@@ -4706,6 +4728,7 @@ export const Composer = forwardRef<
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [dragActive, setDragActive] = useState(false);
   const [sendPending, setSendPending] = useState(false);
+  const [hasDraftText, setHasDraftText] = useState(false);
   const draftStoreRef = useRef<Map<string, string>>(new Map());
   const activeDraftKeyRef = useRef<string | undefined>(props.draftKey);
   const sendPendingRef = useRef(false);
@@ -4731,7 +4754,9 @@ export const Composer = forwardRef<
   }
 
   function saveCurrentDraft(value?: string) {
-    rememberComposerDraft(draftStoreRef.current, activeDraftKeyRef.current, value ?? textareaRef.current?.value ?? '');
+    const nextValue = value ?? textareaRef.current?.value ?? '';
+    rememberComposerDraft(draftStoreRef.current, activeDraftKeyRef.current, nextValue);
+    setHasDraftText(Boolean(nextValue.trim()));
   }
 
   function resetPromptHistoryNavigation() {
@@ -4752,7 +4777,9 @@ export const Composer = forwardRef<
       activeDraftKeyRef.current = nextKey;
       resetPromptHistoryNavigation();
       if (el) {
-        el.value = readComposerDraft(draftStoreRef.current, nextKey);
+        const nextDraft = readComposerDraft(draftStoreRef.current, nextKey);
+        el.value = nextDraft;
+        setHasDraftText(Boolean(nextDraft.trim()));
         autoResize();
         const length = el.value.length;
         el.setSelectionRange(length, length);
@@ -4931,6 +4958,7 @@ export const Composer = forwardRef<
   }, [dragActive]);
 
   if (props.hidden) return null;
+  const sendDisabled = props.disabled || sendPending || !hasDraftText;
 
   return (
     <form
@@ -5001,7 +5029,7 @@ export const Composer = forwardRef<
                 {buttonCopy.stopLabel}
               </button>
             ) : (
-              <button className="maka-button" data-variant="primary" type="submit" disabled={props.disabled || sendPending}>
+              <button className="maka-button" data-variant="primary" type="submit" disabled={sendDisabled}>
                 {buttonCopy.sendLabel}
               </button>
             )}

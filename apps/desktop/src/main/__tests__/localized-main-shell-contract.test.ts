@@ -101,6 +101,7 @@ describe('localized main shell contract', () => {
   it('hides the app shell from the accessibility tree while a top-level modal is open', async () => {
     const main = await readFile(join(process.cwd(), 'src', 'renderer', 'main.tsx'), 'utf8');
     const appShell = main.match(/const hasModalOpen[\s\S]*?<div\s+className="app maka-shell-2col"[\s\S]*?style=\{\{/)?.[0] ?? '';
+    const modalMounts = main.match(/<\/div>\s*\{activePermission && \([\s\S]*?\{settingsOpen && \(/)?.[0] ?? '';
 
     assert.match(
       appShell,
@@ -114,9 +115,59 @@ describe('localized main shell contract', () => {
     );
     assert.match(
       appShell,
+      /inert=\{hasModalOpen \? true : undefined\}/,
+      'the background app shell must be inert while modal siblings are mounted so focus and pointer events cannot escape behind the modal',
+    );
+    assert.match(
+      appShell,
       /data-modal-background-hidden=\{hasModalOpen \? 'true' : undefined\}/,
       'the modal background-hidden state should remain inspectable in visual/a11y smoke runs',
     );
+    assert.match(
+      modalMounts,
+      /\{activePermission && \([\s\S]*?<PermissionDialog[\s\S]*?\)\}\s*\{settingsOpen && \(/,
+      'top-level modals must remain siblings after the hidden/inert app shell, not descendants of it',
+    );
+  });
+
+  it('focuses the active Settings nav item when the modal opens', async () => {
+    const settings = await readFile(join(process.cwd(), 'src', 'renderer', 'settings', 'SettingsModal.tsx'), 'utf8');
+    const modalBlock = settings.match(/function SettingsModal[\s\S]*?function SettingsSurface/)?.[0] ?? '';
+    const navButtonBlock = settings.match(/items\.map\(\(item\) => \([\s\S]*?<\/button>\s*\)\)/)?.[0] ?? '';
+
+    assert.match(
+      modalBlock,
+      /const activeNavRef = useRef<HTMLButtonElement>\(null\);/,
+      'Settings modal must nominate the active nav item as the initial focus target',
+    );
+    assert.match(
+      modalBlock,
+      /useModalA11y\(dialogRef,\s*props\.onClose,\s*activeNavRef\)/,
+      'Settings modal focus should not fall back to the first enabled button when a later section is active',
+    );
+    assert.match(
+      modalBlock,
+      /initialFocusRef=\{activeNavRef\}/,
+      'SettingsSurface must receive the initial focus ref',
+    );
+    assert.match(
+      navButtonBlock,
+      /ref=\{section === item\.id \? props\.initialFocusRef : undefined\}/,
+      'the active Settings nav item should own the initial focus ref',
+    );
+  });
+
+  it('keeps the resizable session-list width as integer pixels for readable splitter values', async () => {
+    const main = await readFile(join(process.cwd(), 'src', 'renderer', 'main.tsx'), 'utf8');
+    const resizeBlock = main.slice(main.indexOf('function startColumnResize'), main.indexOf('function onResizeHandleKeyDown'));
+    const keyBlock = main.slice(main.indexOf('function onResizeHandleKeyDown'), main.indexOf('const hasModalOpen'));
+    const readBlock = main.slice(main.indexOf('function readSessionListWidth'), main.indexOf('function isNoRealConnectionError'));
+
+    assert.match(main, /function clampSessionListWidth\(value: number\): number \{\s*return Math\.round\(clamp\(value, 240, 420\)\);\s*\}/m);
+    assert.match(resizeBlock, /setSessionListWidth\(clampSessionListWidth\(start \+ delta\)\)/);
+    assert.match(keyBlock, /setSessionListWidth\(clampSessionListWidth\(next\)\)/);
+    assert.match(readBlock, /return clampSessionListWidth\(stored\);/);
+    assert.match(main, /aria-valuenow=\{sessionListWidth\}/, 'splitter aria-valuenow should receive the normalized integer state');
   });
 
   it('keeps English skill metadata out of the visible skills list copy', async () => {
