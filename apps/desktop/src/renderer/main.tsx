@@ -516,6 +516,16 @@ function AppShell() {
     });
   }
 
+  function openSessionInChat(sessionId: string, turnId?: string): void {
+    setNavSelection({ section: 'sessions', filter: 'chats' });
+    setActiveId(sessionId);
+    if (turnId) {
+      setSearchScrollTarget({ sessionId, turnId, nonce: Date.now() });
+    } else {
+      setSearchScrollTarget(null);
+    }
+  }
+
   async function handleTurnFooterAction(
     turnId: string,
     actionId: TurnFooterActionMeta['id'],
@@ -537,8 +547,11 @@ function AppShell() {
         toastApi.info('已发起重新生成', '保留旧回答，生成新的并行回答');
       } else if (actionId === 'branch') {
         const newSession = await window.maka.sessions.branchFromTurn(sessionId, { sourceTurnId: turnId });
+        openSessionInChat(newSession.id);
+        upsertSessionSummary(newSession);
+        setMessages([]);
+        await refreshMessages(newSession.id);
         await refreshSessions();
-        setActiveId(newSession.id);
         clearPendingTurnAction(key);
         toastApi.success('已创建分支', `新会话 ${newSession.name}`);
       }
@@ -587,7 +600,7 @@ function AppShell() {
   );
 
   function handleBranchBannerClick(parentSessionId: string): void {
-    setActiveId(parentSessionId);
+    openSessionInChat(parentSessionId);
   }
 
   const activeSessionForView: SessionSummary | undefined = activeSession ?? (activeId ? {
@@ -1865,10 +1878,12 @@ function AppShell() {
    *
    * The discriminated-union result is handled here so the hero stays
    * presentational:
-   *   - `{ ok: true; sessionId }` → setActiveId before refreshing the
-   *     session list. This keeps first-run / quick chat on the newly
-   *     created session even when refreshSessions() completes before
-   *     React commits the state update.
+   *   - `{ ok: true; sessionId }` → open the chat surface before
+   *     refreshing the session list. This keeps first-run / quick chat
+   *     on the newly created session even when refreshSessions()
+   *     completes before React commits the state update, and it also
+   *     makes Command Palette deep-research entrypoints usable from
+   *     Plan / Daily Review / Skills.
    *   - `{ ok: false; reason: 'setup_required' }` → the onboarding
    *     snapshot will be invalidated by the subsequent sessions/
    *     connections event, but call `refresh()` defensively so the
@@ -1884,7 +1899,7 @@ function AppShell() {
     try {
       const result = await window.maka.quickChat.start({ prompt, mode });
       if (result.ok) {
-        setActiveId(result.sessionId);
+        openSessionInChat(result.sessionId);
         await refreshSessions();
         // If the prompt was non-empty, the main process has already
         // started the send via the existing send path. If empty, we
@@ -2193,7 +2208,10 @@ function AppShell() {
             staleSessionIds={staleSessionIds}
             statusGroups={sessionStatusGroups}
             onSelect={setNavSelection}
-            onSelectSession={setActiveId}
+            onSelectSession={(sessionId) => {
+              setActiveId(sessionId);
+              setSearchScrollTarget(null);
+            }}
             onOpenSettings={openSettings}
             onOpenUpdate={() => openSettingsSection('about')}
             onNew={createSession}
@@ -2289,7 +2307,7 @@ function AppShell() {
                 onClearPlanReminderRunHistory={(id) => void clearPlanReminderRunHistory(id)}
                 onDeletePlanReminder={(id) => void deletePlanReminder(id)}
                 dailyReviewBridge={dailyReviewBridge}
-                onSelectSession={setActiveId}
+                onSelectSession={openSessionInChat}
                 onCopyDailyReviewMarkdown={async ({ markdown, label, summary }) => {
                   try {
                     await navigator.clipboard.writeText(markdown);
@@ -2408,8 +2426,7 @@ function AppShell() {
           }}
           onOpenSession={(sessionId) => {
             closeSettings();
-            setNavSelection({ section: 'sessions', filter: 'chats' });
-            setActiveId(sessionId);
+            openSessionInChat(sessionId);
           }}
         />
       )}
@@ -2436,13 +2453,7 @@ function AppShell() {
           onClose={closeSearchModal}
           deps={{ searchThread: (request) => window.maka.search.thread(request) }}
           onNavigateToSession={(sessionId, turnId) => {
-            setNavSelection({ section: 'sessions', filter: 'chats' });
-            setActiveId(sessionId);
-            if (turnId) {
-              setSearchScrollTarget({ sessionId, turnId, nonce: Date.now() });
-            } else {
-              setSearchScrollTarget(null);
-            }
+            openSessionInChat(sessionId, turnId);
           }}
         />
       )}
@@ -2450,13 +2461,7 @@ function AppShell() {
         <CommandPalette
           onClose={closePalette}
           onSelectSession={(sessionId, turnId) => {
-            setNavSelection({ section: 'sessions', filter: 'chats' });
-            setActiveId(sessionId);
-            if (turnId) {
-              setSearchScrollTarget({ sessionId, turnId, nonce: Date.now() });
-            } else {
-              setSearchScrollTarget(null);
-            }
+            openSessionInChat(sessionId, turnId);
           }}
           commands={buildCommandList({
             sessions: visibleSessions,
@@ -2464,7 +2469,9 @@ function AppShell() {
             themePref,
             connections,
             defaultSlug: defaultConnection,
-            onSelectSession: setActiveId,
+            onSelectSession: (sessionId) => {
+              openSessionInChat(sessionId);
+            },
             onNewChat: () => void createSession(),
             onStartDeepResearch: () => void handleQuickChatSubmit('', 'deep_research'),
             onStartPlanReminder: openPlanReminderForm,
