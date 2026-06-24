@@ -86,7 +86,13 @@ export const itemMediaVariants = cva(
   },
 );
 
-export interface ItemMediaProps extends useRender.ComponentProps<"div"> {
+// Sub-slots default to `span`, not `div`/`p`: an Item is routinely rendered
+// as a `<button>` (provider rows, OAuth cards, connection rows), and a button
+// may only contain phrasing content. A `<div>`/`<p>` child is invalid there
+// and trips React DOM-nesting checks. A `span` with the same flex/line-clamp
+// classes lays out identically and is valid inside both a button and a div, so
+// call sites never have to remember `render={<span />}`.
+export interface ItemMediaProps extends useRender.ComponentProps<"span"> {
   variant?: VariantProps<typeof itemMediaVariants>["variant"];
 }
 
@@ -101,8 +107,8 @@ export function ItemMedia({
     "data-slot": "item-media",
   };
   return useRender({
-    defaultTagName: "div",
-    props: mergeProps<"div">(defaultProps, props),
+    defaultTagName: "span",
+    props: mergeProps<"span">(defaultProps, props),
     render,
   });
 }
@@ -111,14 +117,14 @@ export function ItemContent({
   className,
   render,
   ...props
-}: useRender.ComponentProps<"div">): React.ReactElement {
+}: useRender.ComponentProps<"span">): React.ReactElement {
   const defaultProps = {
     className: cn("flex min-w-0 flex-1 flex-col gap-0.5", className),
     "data-slot": "item-content",
   };
   return useRender({
-    defaultTagName: "div",
-    props: mergeProps<"div">(defaultProps, props),
+    defaultTagName: "span",
+    props: mergeProps<"span">(defaultProps, props),
     render,
   });
 }
@@ -127,7 +133,7 @@ export function ItemTitle({
   className,
   render,
   ...props
-}: useRender.ComponentProps<"div">): React.ReactElement {
+}: useRender.ComponentProps<"span">): React.ReactElement {
   const defaultProps = {
     className: cn(
       "flex w-full items-center gap-2 text-sm font-medium leading-snug",
@@ -136,8 +142,8 @@ export function ItemTitle({
     "data-slot": "item-title",
   };
   return useRender({
-    defaultTagName: "div",
-    props: mergeProps<"div">(defaultProps, props),
+    defaultTagName: "span",
+    props: mergeProps<"span">(defaultProps, props),
     render,
   });
 }
@@ -146,7 +152,7 @@ export function ItemDescription({
   className,
   render,
   ...props
-}: useRender.ComponentProps<"p">): React.ReactElement {
+}: useRender.ComponentProps<"span">): React.ReactElement {
   const defaultProps = {
     className: cn(
       "line-clamp-2 text-xs leading-snug text-muted-foreground",
@@ -155,8 +161,8 @@ export function ItemDescription({
     "data-slot": "item-description",
   };
   return useRender({
-    defaultTagName: "p",
-    props: mergeProps<"p">(defaultProps, props),
+    defaultTagName: "span",
+    props: mergeProps<"span">(defaultProps, props),
     render,
   });
 }
@@ -165,14 +171,14 @@ export function ItemActions({
   className,
   render,
   ...props
-}: useRender.ComponentProps<"div">): React.ReactElement {
+}: useRender.ComponentProps<"span">): React.ReactElement {
   const defaultProps = {
     className: cn("flex shrink-0 items-center gap-1 text-muted-foreground", className),
     "data-slot": "item-actions",
   };
   return useRender({
-    defaultTagName: "div",
-    props: mergeProps<"div">(defaultProps, props),
+    defaultTagName: "span",
+    props: mergeProps<"span">(defaultProps, props),
     render,
   });
 }
