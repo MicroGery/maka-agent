@@ -10,6 +10,14 @@ export const FIXED_PROMPT_WAL_SCHEMA_VERSION = 1;
 export interface FixedPromptTask {
   id: string;
   path: string;
+  metadata?: {
+    difficulty?: string;
+    estimatedDurationSec?: number;
+    expertTimeEstimateMin?: number;
+    juniorTimeEstimateMin?: number;
+    agentTimeoutSec?: number;
+    verifierTimeoutSec?: number;
+  };
 }
 
 export type HarborTaskRunCellOutput = HarborCellOutput & {
@@ -33,6 +41,13 @@ export interface HarborTaskRunInput {
 
 export type HarborTaskRunner = (input: HarborTaskRunInput) => Promise<HarborTaskRunOutput>;
 
+export class FixedPromptBudgetExhaustedError extends Error {
+  constructor(message: string, readonly detail?: string) {
+    super(message);
+    this.name = 'FixedPromptBudgetExhaustedError';
+  }
+}
+
 export interface ReadHarborTaskRunOutputInput {
   harborResultPath: string;
   cellOutputPath: string;
@@ -45,6 +60,7 @@ export interface FixedPromptTaskCompletedEvent {
   ts: number;
   runId: string;
   roundId: string;
+  resumeFingerprint?: string;
   taskId: string;
   status: HarborCellOutput['status'];
   passed: boolean;
@@ -69,6 +85,7 @@ export interface FixedPromptTaskInfraFailedEvent {
   ts: number;
   runId: string;
   roundId: string;
+  resumeFingerprint?: string;
   taskId: string;
   status: 'infra_failed';
   passed: false;
@@ -78,6 +95,24 @@ export interface FixedPromptTaskInfraFailedEvent {
   error: string;
 }
 
+export interface FixedPromptTaskBudgetExhaustedEvent {
+  schemaVersion: typeof FIXED_PROMPT_WAL_SCHEMA_VERSION;
+  type: 'task_budget_exhausted';
+  id: string;
+  ts: number;
+  runId: string;
+  roundId: string;
+  resumeFingerprint?: string;
+  taskId: string;
+  status: 'budget_exhausted';
+  passed: false;
+  scored: false;
+  eligible: true;
+  errorClass: 'budget_exhausted';
+  error: string;
+  expectedPromptHash: string;
+}
+
 export interface FixedPromptTaskPlumbingFailedEvent {
   schemaVersion: typeof FIXED_PROMPT_WAL_SCHEMA_VERSION;
   type: 'task_plumbing_failed';
@@ -85,6 +120,7 @@ export interface FixedPromptTaskPlumbingFailedEvent {
   ts: number;
   runId: string;
   roundId: string;
+  resumeFingerprint?: string;
   taskId: string;
   status: 'plumbing_failed';
   passed: false;
@@ -145,6 +181,7 @@ export interface PromptCandidateDecisionEvent {
 export type FixedPromptWalEvent =
   | FixedPromptTaskCompletedEvent
   | FixedPromptTaskInfraFailedEvent
+  | FixedPromptTaskBudgetExhaustedEvent
   | FixedPromptTaskPlumbingFailedEvent
   | PromptCandidateCommittedEvent
   | PromptCandidateDecisionEvent;
@@ -152,6 +189,7 @@ export type FixedPromptWalEvent =
 export type FixedPromptTaskWalEvent =
   | FixedPromptTaskCompletedEvent
   | FixedPromptTaskInfraFailedEvent
+  | FixedPromptTaskBudgetExhaustedEvent
   | FixedPromptTaskPlumbingFailedEvent;
 
 export interface RunFixedPromptControllerInput {
@@ -165,6 +203,7 @@ export interface RunFixedPromptControllerInput {
   maxInfraFailureRate?: number;
   costCeilingUsd?: number;
   maxConcurrency?: number;
+  resumeFingerprint?: string;
   harborRunner: HarborTaskRunner;
   now?: () => number;
   newId?: () => string;
@@ -198,49 +237,74 @@ export async function runFixedPromptController(
   const expectedPromptHash = hashSystemPrompt(systemPrompt);
   const config = { ...input.config, systemPrompt };
   const events = await readFixedPromptWal(input.resultsJsonlPath);
-  const completed = terminalTaskEvents(events, input.runId, input.roundId, expectedPromptHash);
-  const stopEvidence = roundTaskEvents(events, input.runId, input.roundId, expectedPromptHash);
+  const completed = terminalTaskEvents(events, input.runId, input.roundId, expectedPromptHash, input.resumeFingerprint);
+  const stopEvidence = roundTaskEvents(events, input.runId, input.roundId, expectedPromptHash, input.resumeFingerprint);
   let stopReason = controllerStopReason({
     events: [...stopEvidence.values()],
     taskCount: input.tasks.length,
     maxInfraFailureRate: input.maxInfraFailureRate,
     costCeilingUsd: input.costCeilingUsd,
   });
-  // Always validate the requested concurrency (even when a stop guard forces the
-  // effective value to 1) so a fractional/NaN value never slips through unchecked.
-  const requestedConcurrency = normalizeMaxConcurrency(input.maxConcurrency);
-  const maxConcurrency = hasStopGuard(input) ? 1 : requestedConcurrency;
+  // Stop guards are checked after completed tasks; in-flight tasks are allowed
+  // to finish so configured concurrency remains useful for benchmark waves.
+  const maxConcurrency = normalizeMaxConcurrency(input.maxConcurrency);
+  let nextTaskIndex = 0;
+  let nextAppendIndex = 0;
+  const pendingEvents = new Map<number, FixedPromptTaskWalEvent>();
+  const active = new Map<number, Promise<{ index: number; event: FixedPromptTaskWalEvent }>>();
 
-  for (let index = 0; index < input.tasks.length;) {
-    if (stopReason) break;
-    const batch: FixedPromptTask[] = [];
-    while (batch.length < maxConcurrency && index < input.tasks.length) {
-      const task = input.tasks[index++]!;
-      if (!completed.has(task.id)) batch.push(task);
-    }
-    if (batch.length === 0) continue;
-    const batchEvents = await Promise.all(batch.map((task) => runTaskAndBuildEvent({
-      input,
-      task,
-      config,
-      systemPrompt,
-      expectedPromptHash,
-      id: newId(),
-      ts: now(),
-    })));
-    for (const event of batchEvents) {
+  const appendReadyEvents = async () => {
+    while (nextAppendIndex < input.tasks.length) {
+      const task = input.tasks[nextAppendIndex]!;
+      if (completed.has(task.id) && !pendingEvents.has(nextAppendIndex)) {
+        nextAppendIndex += 1;
+        continue;
+      }
+      const event = pendingEvents.get(nextAppendIndex);
+      if (!event) break;
       await appendFixedPromptWalEvent(input.resultsJsonlPath, event);
       events.push(event);
       completed.set(event.taskId, event);
       stopEvidence.set(event.taskId, event);
+      pendingEvents.delete(nextAppendIndex);
+      nextAppendIndex += 1;
     }
+  };
+
+  const launchReadyTasks = () => {
+    while (!stopReason && active.size < maxConcurrency && nextTaskIndex < input.tasks.length) {
+      const index = nextTaskIndex;
+      const task = input.tasks[nextTaskIndex++]!;
+      if (completed.has(task.id)) continue;
+      active.set(index, runTaskAndBuildEvent({
+        input,
+        task,
+        config,
+        systemPrompt,
+        expectedPromptHash,
+        resumeFingerprint: input.resumeFingerprint,
+        id: newId(),
+        ts: now(),
+      }).then((event) => ({ index, event })));
+    }
+  };
+
+  launchReadyTasks();
+  while (active.size > 0) {
+    const { index, event } = await Promise.race(active.values());
+    active.delete(index);
+    pendingEvents.set(index, event);
+    stopEvidence.set(event.taskId, event);
     stopReason = controllerStopReason({
       events: [...stopEvidence.values()],
       taskCount: input.tasks.length,
       maxInfraFailureRate: input.maxInfraFailureRate,
       costCeilingUsd: input.costCeilingUsd,
     });
+    await appendReadyEvents();
+    launchReadyTasks();
   }
+  await appendReadyEvents();
 
   const resultByTask = stopReason ? stopEvidence : completed;
   const resultEvents = input.tasks
@@ -251,8 +315,8 @@ export async function runFixedPromptController(
   return {
     taskIds: resultEvents.map((event) => event.taskId),
     events: resultEvents,
-    totalTokens: sum(resultEvents.map((event) => event.type !== 'task_infra_failed' ? event.tokenSummary.total : 0)),
-    totalCostUsd: sum(resultEvents.map((event) => event.type !== 'task_infra_failed' ? event.tokenSummary.costUsd : 0)),
+    totalTokens: sum(resultEvents.map((event) => eventHasRunArtifacts(event) ? event.tokenSummary.total : 0)),
+    totalCostUsd: sum(resultEvents.map((event) => eventHasRunArtifacts(event) ? event.tokenSummary.costUsd : 0)),
     resultsTsvPath: input.resultsTsvPath,
     ...(stopReason ? { stopReason } : {}),
   };
@@ -334,10 +398,10 @@ export async function writeFixedPromptResultsTsv(
     String(event.scored),
     String(event.eligible),
     event.errorClass ?? '',
-    event.type !== 'task_infra_failed' ? event.promptHash ?? '' : '',
-    String(event.type !== 'task_infra_failed' ? event.tokenSummary.total : 0),
-    String(event.type !== 'task_infra_failed' ? event.tokenSummary.costUsd : 0),
-    event.type !== 'task_infra_failed' ? event.runtimeEventsPath : '',
+    eventHasRunArtifacts(event) ? event.promptHash ?? '' : '',
+    String(eventHasRunArtifacts(event) ? event.tokenSummary.total : 0),
+    String(eventHasRunArtifacts(event) ? event.tokenSummary.costUsd : 0),
+    eventHasRunArtifacts(event) ? event.runtimeEventsPath : '',
   ]);
   const body = [header, ...rows].map((row) => row.map(tsvCell).join('\t')).join('\n');
   await writeFile(path, `${body}\n`, 'utf8');
@@ -349,6 +413,7 @@ async function runTaskAndBuildEvent(input: {
   config: Config;
   systemPrompt: string;
   expectedPromptHash: string;
+  resumeFingerprint?: string;
   id: string;
   ts: number;
 }): Promise<FixedPromptTaskWalEvent> {
@@ -362,21 +427,48 @@ async function runTaskAndBuildEvent(input: {
   let output;
   try {
     output = await runHarbor();
-  } catch {
+  } catch (error) {
+    if (isBudgetExhaustedError(error)) {
+      return taskBudgetExhaustedEvent({
+        error,
+        taskId: input.task.id,
+        runId: input.input.runId,
+        roundId: input.input.roundId,
+        expectedPromptHash: input.expectedPromptHash,
+        resumeFingerprint: input.resumeFingerprint,
+        id: input.id,
+        ts: input.ts,
+      });
+    }
     // #64: a thrown Harbor/Docker error is an infra failure, often a transient
-    // flake (container build hiccup, timeout). Retry the same task + prompt once
+    // flake (container build hiccup). Retry the same task + prompt once
     // before recording task_infra_failed, so a single blip does not pollute the
     // candidate's decision. A second failure is treated as a real infra failure.
+    // A budget exhaustion is a benchmark outcome, not an infra flake, so it is
+    // recorded immediately and counted separately by A/B reports.
     // A plumbing failure (a successful run with bad output) does not throw and is
     // not retried — it is deterministic.
     try {
       output = await runHarbor();
     } catch (error) {
+      if (isBudgetExhaustedError(error)) {
+        return taskBudgetExhaustedEvent({
+          error,
+          taskId: input.task.id,
+          runId: input.input.runId,
+          roundId: input.input.roundId,
+          expectedPromptHash: input.expectedPromptHash,
+          resumeFingerprint: input.resumeFingerprint,
+          id: input.id,
+          ts: input.ts,
+        });
+      }
       return taskInfraFailedEvent({
         error,
         taskId: input.task.id,
         runId: input.input.runId,
         roundId: input.input.roundId,
+        resumeFingerprint: input.resumeFingerprint,
         id: input.id,
         ts: input.ts,
       });
@@ -385,6 +477,7 @@ async function runTaskAndBuildEvent(input: {
   return taskEventFromOutput({
     output,
     expectedPromptHash: input.expectedPromptHash,
+    resumeFingerprint: input.resumeFingerprint,
     taskId: input.task.id,
     runId: input.input.runId,
     roundId: input.input.roundId,
@@ -396,6 +489,7 @@ async function runTaskAndBuildEvent(input: {
 function taskEventFromOutput(input: {
   output: HarborTaskRunOutput;
   expectedPromptHash: string;
+  resumeFingerprint?: string;
   taskId: string;
   runId: string;
   roundId: string;
@@ -418,6 +512,7 @@ function taskCompletedEvent(input: {
   taskId: string;
   runId: string;
   roundId: string;
+  resumeFingerprint?: string;
   id: string;
   ts: number;
 }): FixedPromptTaskCompletedEvent {
@@ -431,6 +526,7 @@ function taskCompletedEvent(input: {
     ts: input.ts,
     runId: input.runId,
     roundId: input.roundId,
+    ...(input.resumeFingerprint ? { resumeFingerprint: input.resumeFingerprint } : {}),
     taskId: input.taskId,
     status: output.cell.status,
     passed,
@@ -452,6 +548,7 @@ function taskCompletedEvent(input: {
 function taskPlumbingFailedEvent(input: {
   output: HarborTaskRunOutput;
   expectedPromptHash: string;
+  resumeFingerprint?: string;
   taskId: string;
   runId: string;
   roundId: string;
@@ -467,6 +564,7 @@ function taskPlumbingFailedEvent(input: {
     ts: input.ts,
     runId: input.runId,
     roundId: input.roundId,
+    ...(input.resumeFingerprint ? { resumeFingerprint: input.resumeFingerprint } : {}),
     taskId: input.taskId,
     status: 'plumbing_failed',
     passed: false,
@@ -517,6 +615,7 @@ function taskInfraFailedEvent(input: {
   taskId: string;
   runId: string;
   roundId: string;
+  resumeFingerprint?: string;
   id: string;
   ts: number;
 }): FixedPromptTaskInfraFailedEvent {
@@ -527,6 +626,7 @@ function taskInfraFailedEvent(input: {
     ts: input.ts,
     runId: input.runId,
     roundId: input.roundId,
+    ...(input.resumeFingerprint ? { resumeFingerprint: input.resumeFingerprint } : {}),
     taskId: input.taskId,
     status: 'infra_failed',
     passed: false,
@@ -537,19 +637,50 @@ function taskInfraFailedEvent(input: {
   };
 }
 
+function taskBudgetExhaustedEvent(input: {
+  error: unknown;
+  taskId: string;
+  runId: string;
+  roundId: string;
+  expectedPromptHash: string;
+  resumeFingerprint?: string;
+  id: string;
+  ts: number;
+}): FixedPromptTaskBudgetExhaustedEvent {
+  return {
+    schemaVersion: FIXED_PROMPT_WAL_SCHEMA_VERSION,
+    type: 'task_budget_exhausted',
+    id: input.id,
+    ts: input.ts,
+    runId: input.runId,
+    roundId: input.roundId,
+    ...(input.resumeFingerprint ? { resumeFingerprint: input.resumeFingerprint } : {}),
+    taskId: input.taskId,
+    status: 'budget_exhausted',
+    passed: false,
+    scored: false,
+    eligible: true,
+    errorClass: 'budget_exhausted',
+    error: errorMessage(input.error),
+    expectedPromptHash: input.expectedPromptHash,
+  };
+}
+
 function terminalTaskEvents(
   events: readonly FixedPromptWalEvent[],
   runId: string,
   roundId: string,
   expectedPromptHash: string,
+  resumeFingerprint: string | undefined,
 ): Map<string, FixedPromptTaskWalEvent> {
   const byTask = new Map<string, FixedPromptTaskWalEvent>();
   for (const event of events) {
     if (!isTaskEvent(event)) continue;
     if (event.runId !== runId || event.roundId !== roundId) continue;
-    if (!eventMatchesPrompt(event, expectedPromptHash)) continue;
+    if (!eventMatchesResumeIdentity(event, expectedPromptHash, resumeFingerprint)) continue;
     if (
       event.type === 'task_completed'
+      || event.type === 'task_budget_exhausted'
       || event.type === 'task_plumbing_failed'
     ) {
       byTask.set(event.taskId, event);
@@ -563,19 +694,28 @@ function roundTaskEvents(
   runId: string,
   roundId: string,
   expectedPromptHash: string,
+  resumeFingerprint: string | undefined,
 ): Map<string, FixedPromptTaskWalEvent> {
   const byTask = new Map<string, FixedPromptTaskWalEvent>();
   for (const event of events) {
     if (!isTaskEvent(event)) continue;
     if (event.runId !== runId || event.roundId !== roundId) continue;
-    if (!eventMatchesPrompt(event, expectedPromptHash)) continue;
+    if (!eventMatchesResumeIdentity(event, expectedPromptHash, resumeFingerprint)) continue;
     byTask.set(event.taskId, event);
   }
   return byTask;
 }
 
-function eventMatchesPrompt(event: FixedPromptTaskWalEvent, expectedPromptHash: string): boolean {
+function eventMatchesResumeIdentity(
+  event: FixedPromptTaskWalEvent,
+  expectedPromptHash: string,
+  resumeFingerprint: string | undefined,
+): boolean {
+  if (resumeFingerprint !== undefined && event.resumeFingerprint !== resumeFingerprint) return false;
   if (event.type === 'task_infra_failed') return true;
+  if (event.type === 'task_budget_exhausted') {
+    return resumeFingerprint !== undefined && event.expectedPromptHash === expectedPromptHash;
+  }
   if (event.promptHash === expectedPromptHash) return true;
   return event.type === 'task_plumbing_failed' && event.expectedPromptHash === expectedPromptHash;
 }
@@ -584,6 +724,7 @@ function isTaskEvent(event: FixedPromptWalEvent): event is
   FixedPromptTaskWalEvent {
   return event.type === 'task_completed'
     || event.type === 'task_infra_failed'
+    || event.type === 'task_budget_exhausted'
     || event.type === 'task_plumbing_failed';
 }
 
@@ -613,17 +754,24 @@ function controllerStopReason(input: {
   return undefined;
 }
 
-function hasStopGuard(input: RunFixedPromptControllerInput): boolean {
-  return input.maxInfraFailureRate !== undefined || input.costCeilingUsd !== undefined;
-}
-
 function infraFailureRate(events: readonly FixedPromptTaskWalEvent[], taskCount: number): number {
   if (taskCount <= 0) return 0;
   return events.filter((event) => event.type === 'task_infra_failed').length / taskCount;
 }
 
 function taskEventsCostUsd(events: readonly FixedPromptTaskWalEvent[]): number {
-  return sum(events.map((event) => event.type !== 'task_infra_failed' ? event.tokenSummary.costUsd : 0));
+  return sum(events.map((event) => eventHasRunArtifacts(event) ? event.tokenSummary.costUsd : 0));
+}
+
+function eventHasRunArtifacts(
+  event: FixedPromptTaskWalEvent,
+): event is FixedPromptTaskCompletedEvent | FixedPromptTaskPlumbingFailedEvent {
+  return event.type === 'task_completed' || event.type === 'task_plumbing_failed';
+}
+
+function isBudgetExhaustedError(error: unknown): boolean {
+  return error instanceof FixedPromptBudgetExhaustedError
+    || (typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'FixedPromptBudgetExhaustedError');
 }
 
 function normalizeMaxConcurrency(value: number | undefined): number {

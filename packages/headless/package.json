@@ -12,8 +12,13 @@
     }
   },
   "imports": {
+    "#fixed-prompt-task-source": "./dist/fixed-prompt-task-source.js",
+    "#headless-run-env": "./dist/headless-run-env.js",
     "#prompt-optimization-env": "./dist/prompt-optimization-env.js",
     "#prompt-optimization-run": "./dist/prompt-optimization-run.js",
+    "#prompt-ab-run": "./dist/prompt-ab-run.js",
+    "#harbor-task-runner": "./dist/harbor-task-runner.js",
+    "#harbor-cell": "./dist/harbor-cell.js",
     "#prompt-structural-smoke": "./dist/prompt-structural-smoke.js"
   },
   "bin": {

@@ -6,6 +6,7 @@ import { describe, test } from 'node:test';
 import type { Config } from '../contracts.js';
 import { tokenSummary } from './helpers/cell-output-fixtures.js';
 import {
+  FixedPromptBudgetExhaustedError,
   hashSystemPrompt,
   readHarborTaskRunOutput,
   runFixedPromptController,
@@ -89,6 +90,109 @@ describe('fixed prompt controller', () => {
       assert.equal(result.events[0]?.type, 'task_completed');
       assert.equal(result.events[0]?.promptHash, hashSystemPrompt('fixed prompt\n'));
       assert.equal((await readFile(resultsJsonlPath, 'utf8')).trimEnd().split('\n').length, 2);
+    });
+  });
+
+  test('reuses WAL task events only when the resume fingerprint matches', async () => {
+    await withDir(async (dir) => {
+      const systemPromptPath = join(dir, 'system_prompt.md');
+      const resultsJsonlPath = join(dir, 'results.jsonl');
+      await writeFile(systemPromptPath, 'fixed prompt\n', 'utf8');
+      await appendFile(
+        resultsJsonlPath,
+        `${JSON.stringify(taskCompletedEvent({ taskId: 'task-a', resumeFingerprint: 'fingerprint-old' }))}\n`,
+        'utf8',
+      );
+
+      const matchingCalls: string[] = [];
+      const matching = await runFixedPromptController({
+        runId: 'run-1',
+        roundId: 'round-1',
+        config,
+        systemPromptPath,
+        resultsJsonlPath,
+        resultsTsvPath: join(dir, 'matching.tsv'),
+        tasks: [{ id: 'task-a', path: '/bench/task-a' }],
+        resumeFingerprint: 'fingerprint-old',
+        harborRunner: async ({ task }) => {
+          matchingCalls.push(task.id);
+          return harborOutput({ taskId: task.id });
+        },
+        now: () => 100,
+        newId: idFactory(),
+      });
+      assert.deepEqual(matchingCalls, []);
+      assert.equal(matching.events[0]?.type, 'task_completed');
+
+      const changedCalls: string[] = [];
+      const changed = await runFixedPromptController({
+        runId: 'run-1',
+        roundId: 'round-1',
+        config,
+        systemPromptPath,
+        resultsJsonlPath,
+        resultsTsvPath: join(dir, 'changed.tsv'),
+        tasks: [{ id: 'task-a', path: '/bench/task-a' }],
+        resumeFingerprint: 'fingerprint-new',
+        harborRunner: async ({ task }) => {
+          changedCalls.push(task.id);
+          return harborOutput({ taskId: task.id });
+        },
+        now: () => 200,
+        newId: idFactory(),
+      });
+
+      assert.deepEqual(changedCalls, ['task-a']);
+      assert.equal(changed.events[0]?.type, 'task_completed');
+      assert.equal(changed.events[0]?.resumeFingerprint, 'fingerprint-new');
+      assert.equal((await readFile(resultsJsonlPath, 'utf8')).trimEnd().split('\n').length, 2);
+    });
+  });
+
+  test('reuses budget-exhausted WAL events when the resume fingerprint matches', async () => {
+    await withDir(async (dir) => {
+      const systemPromptPath = join(dir, 'system_prompt.md');
+      const resultsJsonlPath = join(dir, 'results.jsonl');
+      await writeFile(systemPromptPath, 'fixed prompt\n', 'utf8');
+
+      await runFixedPromptController({
+        runId: 'run-1',
+        roundId: 'round-1',
+        config,
+        systemPromptPath,
+        resultsJsonlPath,
+        resultsTsvPath: join(dir, 'results-old.tsv'),
+        tasks: [{ id: 'task-a', path: '/bench/task-a' }],
+        resumeFingerprint: 'fingerprint-same',
+        harborRunner: async () => {
+          throw new FixedPromptBudgetExhaustedError('harbor run timed out after 600s');
+        },
+        now: () => 100,
+        newId: idFactory(),
+      });
+
+      const calls: string[] = [];
+      const result = await runFixedPromptController({
+        runId: 'run-1',
+        roundId: 'round-1',
+        config,
+        systemPromptPath,
+        resultsJsonlPath,
+        resultsTsvPath: join(dir, 'results-new.tsv'),
+        tasks: [{ id: 'task-a', path: '/bench/task-a' }],
+        resumeFingerprint: 'fingerprint-same',
+        harborRunner: async ({ task }) => {
+          calls.push(task.id);
+          return harborOutput({ taskId: task.id });
+        },
+        now: () => 200,
+        newId: idFactory(),
+      });
+
+      assert.deepEqual(calls, []);
+      assert.equal(result.events[0]?.type, 'task_budget_exhausted');
+      assert.equal(result.events[0]?.resumeFingerprint, 'fingerprint-same');
+      assert.equal((await readFile(resultsJsonlPath, 'utf8')).trimEnd().split('\n').length, 1);
     });
   });
 
@@ -304,6 +408,84 @@ describe('fixed prompt controller', () => {
     });
   });
 
+  test('records task_budget_exhausted without retrying budget errors', async () => {
+    await withDir(async (dir) => {
+      const systemPromptPath = join(dir, 'system_prompt.md');
+      const resultsJsonlPath = join(dir, 'results.jsonl');
+      await writeFile(systemPromptPath, 'fixed prompt\n', 'utf8');
+
+      let attempts = 0;
+      const result = await runFixedPromptController({
+        runId: 'run-1',
+        roundId: 'round-1',
+        config,
+        systemPromptPath,
+        resultsJsonlPath,
+        resultsTsvPath: join(dir, 'results.tsv'),
+        tasks: [{ id: 'task-a', path: '/bench/task-a' }],
+        harborRunner: async () => {
+          attempts += 1;
+          throw new FixedPromptBudgetExhaustedError('harbor run timed out after 600s');
+        },
+        now: () => 100,
+        newId: idFactory(),
+      });
+
+      assert.equal(attempts, 1);
+      assert.equal(result.events.length, 1);
+      assert.equal(result.events[0]?.type, 'task_budget_exhausted');
+      assert.equal(result.events[0]?.eligible, true);
+      assert.equal(result.events[0]?.passed, false);
+      assert.equal(result.events[0]?.expectedPromptHash, hashSystemPrompt('fixed prompt\n'));
+      assert.match(await readFile(resultsJsonlPath, 'utf8'), /"type":"task_budget_exhausted"/);
+    });
+  });
+
+  test('reruns budget-exhausted WAL events instead of reusing a timeout', async () => {
+    await withDir(async (dir) => {
+      const systemPromptPath = join(dir, 'system_prompt.md');
+      const resultsJsonlPath = join(dir, 'results.jsonl');
+      await writeFile(systemPromptPath, 'fixed prompt\n', 'utf8');
+
+      await runFixedPromptController({
+        runId: 'run-1',
+        roundId: 'round-1',
+        config,
+        systemPromptPath,
+        resultsJsonlPath,
+        resultsTsvPath: join(dir, 'results-old.tsv'),
+        tasks: [{ id: 'task-a', path: '/bench/task-a' }],
+        harborRunner: async () => {
+          throw new FixedPromptBudgetExhaustedError('harbor run timed out after 600s');
+        },
+        now: () => 100,
+        newId: idFactory(),
+      });
+
+      const calls: string[] = [];
+      const result = await runFixedPromptController({
+        runId: 'run-1',
+        roundId: 'round-1',
+        config,
+        systemPromptPath,
+        resultsJsonlPath,
+        resultsTsvPath: join(dir, 'results-new.tsv'),
+        tasks: [{ id: 'task-a', path: '/bench/task-a' }],
+        harborRunner: async ({ task }) => {
+          calls.push(task.id);
+          return harborOutput({ taskId: task.id });
+        },
+        now: () => 200,
+        newId: idFactory(),
+      });
+
+      assert.deepEqual(calls, ['task-a']);
+      assert.equal(result.events[0]?.type, 'task_completed');
+      assert.equal(result.events[0]?.promptHash, hashSystemPrompt('fixed prompt\n'));
+      assert.equal((await readFile(resultsJsonlPath, 'utf8')).trimEnd().split('\n').length, 2);
+    });
+  });
+
   test('stops when infra failures exceed the configured rate', async () => {
     await withDir(async (dir) => {
       const systemPromptPath = join(dir, 'system_prompt.md');
@@ -343,7 +525,7 @@ describe('fixed prompt controller', () => {
     });
   });
 
-  test('checks infra failure rate between tasks even when concurrency is configured', async () => {
+  test('checks infra failure rate between rolling concurrency waves', async () => {
     await withDir(async (dir) => {
       const systemPromptPath = join(dir, 'system_prompt.md');
       const resultsJsonlPath = join(dir, 'results.jsonl');
@@ -380,10 +562,10 @@ describe('fixed prompt controller', () => {
         newId: idFactory(),
       });
 
-      assert.equal(maxInFlight, 1);
-      assert.deepEqual([...new Set(calls)], ['task-a', 'task-b']);
+      assert.equal(maxInFlight, 3);
+      assert.deepEqual([...new Set(calls)], ['task-a', 'task-b', 'task-c', 'task-d']);
       assert.equal(result.stopReason, 'infra_failure_rate_exceeded');
-      assert.deepEqual(result.taskIds, ['task-a', 'task-b']);
+      assert.deepEqual(result.taskIds, ['task-a', 'task-b', 'task-c', 'task-d']);
     });
   });
 
@@ -530,7 +712,7 @@ describe('fixed prompt controller', () => {
     });
   });
 
-  test('checks the cost ceiling between tasks even when concurrency is configured', async () => {
+  test('checks the cost ceiling between rolling concurrency waves', async () => {
     await withDir(async (dir) => {
       const systemPromptPath = join(dir, 'system_prompt.md');
       const resultsJsonlPath = join(dir, 'results.jsonl');
@@ -568,11 +750,11 @@ describe('fixed prompt controller', () => {
         newId: idFactory(),
       });
 
-      assert.equal(maxInFlight, 1);
-      assert.deepEqual(calls, ['task-a', 'task-b']);
+      assert.equal(maxInFlight, 3);
+      assert.deepEqual(calls, ['task-a', 'task-b', 'task-c']);
       assert.equal(result.stopReason, 'cost_ceiling_exceeded');
-      assert.equal(result.totalCostUsd, 0.04);
-      assert.deepEqual(result.taskIds, ['task-a', 'task-b']);
+      assert.equal(result.totalCostUsd, 0.06);
+      assert.deepEqual(result.taskIds, ['task-a', 'task-b', 'task-c']);
     });
   });
 
@@ -644,6 +826,54 @@ describe('fixed prompt controller', () => {
       });
 
       assert.equal(maxInFlight, 2);
+      assert.deepEqual(result.taskIds, ['task-a', 'task-b', 'task-c']);
+      const events = (await readFile(resultsJsonlPath, 'utf8')).trimEnd().split('\n').map((line) => JSON.parse(line));
+      assert.deepEqual(events.map((event) => event.taskId), ['task-a', 'task-b', 'task-c']);
+    });
+  });
+
+  test('refills concurrency slots before a slow task finishes', async () => {
+    await withDir(async (dir) => {
+      const systemPromptPath = join(dir, 'system_prompt.md');
+      const resultsJsonlPath = join(dir, 'results.jsonl');
+      await writeFile(systemPromptPath, 'fixed prompt\n', 'utf8');
+
+      const releaseA = deferred<void>();
+      const taskCStarted = deferred<void>();
+      let taskAFinished = false;
+      const calls: string[] = [];
+      const run = runFixedPromptController({
+        runId: 'run-1',
+        roundId: 'round-1',
+        config,
+        systemPromptPath,
+        resultsJsonlPath,
+        resultsTsvPath: join(dir, 'results.tsv'),
+        tasks: [
+          { id: 'task-a', path: '/bench/task-a' },
+          { id: 'task-b', path: '/bench/task-b' },
+          { id: 'task-c', path: '/bench/task-c' },
+        ],
+        maxConcurrency: 2,
+        harborRunner: async ({ task }) => {
+          calls.push(task.id);
+          if (task.id === 'task-a') {
+            await releaseA.promise;
+            taskAFinished = true;
+          }
+          if (task.id === 'task-c') taskCStarted.resolve();
+          return harborOutput({ taskId: task.id });
+        },
+        now: () => 100,
+        newId: idFactory(),
+      });
+
+      await withTimeout(taskCStarted.promise, 200, 'task-c should start before task-a finishes');
+      assert.equal(taskAFinished, false);
+      releaseA.resolve();
+      const result = await run;
+
+      assert.deepEqual(calls, ['task-a', 'task-b', 'task-c']);
       assert.deepEqual(result.taskIds, ['task-a', 'task-b', 'task-c']);
       const events = (await readFile(resultsJsonlPath, 'utf8')).trimEnd().split('\n').map((line) => JSON.parse(line));
       assert.deepEqual(events.map((event) => event.taskId), ['task-a', 'task-b', 'task-c']);
@@ -777,7 +1007,7 @@ describe('fixed prompt controller', () => {
   });
 });
 
-function taskCompletedEvent(input: { taskId: string; promptHash?: string }): FixedPromptWalEvent {
+function taskCompletedEvent(input: { taskId: string; promptHash?: string; resumeFingerprint?: string }): FixedPromptWalEvent {
   return {
     schemaVersion: 1,
     type: 'task_completed',
@@ -791,6 +1021,7 @@ function taskCompletedEvent(input: { taskId: string; promptHash?: string }): Fix
     scored: true,
     eligible: true,
     promptHash: input.promptHash ?? hashSystemPrompt('fixed prompt\n'),
+    ...(input.resumeFingerprint ? { resumeFingerprint: input.resumeFingerprint } : {}),
     tokenSummary: tokenSummary({ input: 2, output: 3, reasoning: 0, total: 5, costUsd: 0.01 }),
     steps: 4,
     durationMs: 50,
@@ -861,6 +1092,30 @@ function idFactory(): () => string {
 
 async function delay(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T | PromiseLike<T>) => void; reject: (error: unknown) => void } {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function withDir(fn: (dir: string) => Promise<void>): Promise<void> {

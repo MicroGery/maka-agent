@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import { tokenSummary } from './helpers/cell-output-fixtures.js';
 import type { HarborCellOutput } from '../cell-output.js';
-import type { HarborTaskRunInput } from '../fixed-prompt-controller.js';
+import { FixedPromptBudgetExhaustedError, type HarborTaskRunInput } from '../fixed-prompt-controller.js';
 import {
   buildHarborJobConfig,
   createHarborTaskRunner,
@@ -52,6 +52,7 @@ interface FakeOptions {
   cell?: HarborCellOutput | null;
   exitCode?: number;
   events?: string;
+  trialResult?: Record<string, unknown>;
   captured?: { config?: Record<string, unknown> };
 }
 
@@ -72,6 +73,9 @@ function fakeRunner(opts: FakeOptions): HarborProcessRunner {
     }
     if (opts.cell !== null) {
       await writeFile(join(trialDir, 'agent', 'maka-cell-output.json'), JSON.stringify(opts.cell ?? cellOutput()), 'utf8');
+    }
+    if (opts.trialResult) {
+      await writeFile(join(trialDir, 'result.json'), JSON.stringify(opts.trialResult), 'utf8');
     }
     await writeFile(join(trialDir, 'agent', 'runtime-events.jsonl'), opts.events ?? '{"type":"x"}\n', 'utf8');
     await mkdir(join(trialDir, 'agent', 'maka-storage', 'sessions', 'sess', 'runs', 'run'), { recursive: true });
@@ -116,6 +120,44 @@ describe('createHarborTaskRunner', () => {
       assert.doesNotMatch(output.cell.runtimeEventsPath, /^\/logs\//);
       assert.match(output.cell.traceEventsPath ?? '', /run-1\/round-1\/task-1\/trial\/cobol-modernization__t1\/agent\/maka-storage\/sessions\/sess\/runs\/run\/events\.jsonl$/);
       assert.doesNotMatch(output.cell.traceEventsPath ?? '', /^\/logs\//);
+    });
+  });
+
+  test('selects the Harbor result trial instead of a stale matching directory', async () => {
+    await withRun(async ({ jobsDir, repo }) => {
+      const runner = createHarborTaskRunner({
+        makaRepoPath: repo,
+        jobsDir,
+        model: 'deepseek/deepseek-v4-flash',
+        runHarbor: async (request) => {
+          const staleDir = join(request.jobsDir, request.jobName, 'cobol-modernization__aaa');
+          await mkdir(join(staleDir, 'agent'), { recursive: true });
+          await writeFile(join(staleDir, 'agent', 'maka-cell-output.json'), JSON.stringify(cellOutput({ promptHash: 'sha256:stale' })), 'utf8');
+
+          const realDir = join(request.jobsDir, request.jobName, 'cobol-modernization__zzz');
+          await mkdir(join(realDir, 'verifier'), { recursive: true });
+          await mkdir(join(realDir, 'agent'), { recursive: true });
+          await writeFile(join(realDir, 'verifier', 'reward.txt'), '1\n', 'utf8');
+          await writeFile(join(realDir, 'agent', 'maka-cell-output.json'), JSON.stringify(cellOutput({ promptHash: 'sha256:real' })), 'utf8');
+          await writeFile(join(realDir, 'agent', 'runtime-events.jsonl'), '{"type":"x"}\n', 'utf8');
+          await mkdir(join(realDir, 'agent', 'maka-storage', 'sessions', 'sess', 'runs', 'run'), { recursive: true });
+          await writeFile(join(realDir, 'agent', 'maka-storage', 'sessions', 'sess', 'runs', 'run', 'events.jsonl'), '{"type":"tool_failed"}\n', 'utf8');
+          await writeFile(join(request.jobsDir, request.jobName, 'result.json'), JSON.stringify({
+            stats: {
+              evals: {
+                maka: {
+                  reward_stats: { reward: { '1.0': ['cobol-modernization__zzz'] } },
+                },
+              },
+            },
+          }), 'utf8');
+          return { exitCode: 0, stdout: 'ok', stderr: '' };
+        },
+      });
+
+      const output = await runner(runInput());
+      assert.equal(output.cell.promptHash, 'sha256:real');
+      assert.equal(output.harbor.reward, 1);
     });
   });
 
@@ -250,6 +292,70 @@ describe('createHarborTaskRunner', () => {
     });
   });
 
+  test('reports Harbor trial exception when setup fails before verifier reward exists', async () => {
+    await withRun(async ({ jobsDir, repo }) => {
+      const runner = createHarborTaskRunner({
+        makaRepoPath: repo,
+        jobsDir,
+        model: 'deepseek/deepseek-v4-flash',
+        runHarbor: fakeRunner({
+          cell: cellOutput(),
+          trialResult: {
+            exception_info: {
+              exception_type: 'NonZeroAgentExitCodeError',
+              exception_message: 'Command failed (exit 127): nvm install 22',
+            },
+          },
+        }),
+      });
+      await assert.rejects(
+        runner(runInput()),
+        /Harbor trial failed before verifier reward for task task-1: NonZeroAgentExitCodeError: Command failed \(exit 127\): nvm install 22/,
+      );
+    });
+  });
+
+  test('treats host cell timeout before verifier reward as budget exhausted', async () => {
+    await withRun(async ({ jobsDir, repo }) => {
+      const runner = createHarborTaskRunner({
+        makaRepoPath: repo,
+        jobsDir,
+        model: 'deepseek/deepseek-v4-flash',
+        runHarbor: fakeRunner({
+          cell: cellOutput(),
+          trialResult: {
+            exception_info: {
+              exception_type: 'RuntimeError',
+              exception_message: 'Maka host cell exceeded 1800s',
+            },
+          },
+        }),
+      });
+      await assert.rejects(runner(runInput()), FixedPromptBudgetExhaustedError);
+    });
+  });
+
+  test('treats Harbor agent timeout with verifier reward as budget exhausted', async () => {
+    await withRun(async ({ jobsDir, repo }) => {
+      const runner = createHarborTaskRunner({
+        makaRepoPath: repo,
+        jobsDir,
+        model: 'deepseek/deepseek-v4-flash',
+        runHarbor: fakeRunner({
+          reward: '0\n',
+          cell: cellOutput(),
+          trialResult: {
+            exception_info: {
+              exception_type: 'AgentTimeoutError',
+              exception_message: 'Agent execution timed out after 60.0 seconds',
+            },
+          },
+        }),
+      });
+      await assert.rejects(runner(runInput()), FixedPromptBudgetExhaustedError);
+    });
+  });
+
   test('returns an unscored failed cell without throwing (model API failure path)', async () => {
     await withRun(async ({ jobsDir, repo }) => {
       const runner = createHarborTaskRunner({
@@ -293,6 +399,18 @@ describe('buildHarborJobConfig', () => {
     const env = (config.agents as Array<{ env: Record<string, string> }>)[0]!.env;
     assert.equal(env.MAKA_TRIAL_INPUT_USD_PER_1M, undefined);
     assert.equal(env.MAKA_BACKEND, 'ai-sdk');
+  });
+
+  test('mirrors the cell timeout into Harbor agent timeout', () => {
+    const config = buildHarborJobConfig(runInput(), {
+      makaRepoPath: '/repo',
+      jobsDir: '/jobs/x',
+      jobName: 'trial',
+      model: 'deepseek/deepseek-v4-flash',
+      agentEnv: { MAKA_CELL_TIMEOUT_SEC: '1800' },
+    });
+    const agent = (config.agents as Array<{ max_timeout_sec?: number }>)[0]!;
+    assert.equal(agent.max_timeout_sec, 1800);
   });
 
   test('keeps a gateway-routed slashful model id when the prefix is not the provider', () => {
@@ -359,6 +477,25 @@ describe('createHarborTaskRunner timeout', () => {
       });
       await runner(runInput());
       assert.equal(seenTimeout, 1234);
+    });
+  });
+
+  test('throws a budget exhaustion error when the harbor process times out', async () => {
+    await withRun(async ({ jobsDir, repo }) => {
+      const runner = createHarborTaskRunner({
+        makaRepoPath: repo,
+        jobsDir,
+        model: 'deepseek/deepseek-v4-flash',
+        harborTimeoutMs: 600_000,
+        runHarbor: async () => ({
+          exitCode: 1,
+          stdout: '',
+          stderr: 'killed after timeout',
+          timedOut: true,
+          signal: 'SIGKILL',
+        }),
+      });
+      await assert.rejects(runner(runInput()), FixedPromptBudgetExhaustedError);
     });
   });
 });

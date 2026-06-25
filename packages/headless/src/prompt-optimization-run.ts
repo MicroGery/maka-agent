@@ -31,13 +31,6 @@ export interface PromptTaskPartition {
 
 export type PromptOptimizationRunResult = PromptOptimizationLoopResult;
 
-export function resolvePromptOptimizationRunRoot(outDir: string, runId: string): string {
-  if (!/^[A-Za-z0-9._-]+$/.test(runId) || runId === '.' || runId === '..') {
-    throw new Error('MAKA_PROMPT_RUN_ID must contain only letters, numbers, dot, underscore, or hyphen');
-  }
-  return join(outDir, runId);
-}
-
 /** Deterministic id-sorted slice into disjoint held-in / held-out partitions, so
  * the same cached task set always yields the same split across runs. */
 export function partitionPromptTasks(
@@ -56,45 +49,6 @@ export function partitionPromptTasks(
     heldInTasks: sorted.slice(0, input.heldInCount),
     heldOutTasks: sorted.slice(input.heldInCount, required),
   };
-}
-
-/** Scan a Harbor task cache (`<root>/<hash>/<task-name>/task.toml`) into a
- * deterministic, id-sorted task list. */
-export async function discoverCachedHarborTasks(tasksRoot: string): Promise<FixedPromptTask[]> {
-  const byId = new Map<string, FixedPromptTask>();
-  let hashDirs;
-  try {
-    hashDirs = await readdir(tasksRoot, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  for (const hashDir of hashDirs) {
-    if (!hashDir.isDirectory()) continue;
-    const hashPath = join(tasksRoot, hashDir.name);
-    let inner;
-    try {
-      inner = await readdir(hashPath, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const taskDir of inner) {
-      if (!taskDir.isDirectory()) continue;
-      const taskPath = join(hashPath, taskDir.name);
-      try {
-        await readFile(join(taskPath, 'task.toml'), 'utf8');
-      } catch {
-        continue;
-      }
-      // The controller keys events by task id, so two cached versions of the same
-      // task name would silently collide and pollute scoring. Fail loud instead.
-      const existing = byId.get(taskDir.name);
-      if (existing) {
-        throw new Error(`duplicate cached task id "${taskDir.name}": ${existing.path} and ${taskPath}`);
-      }
-      byId.set(taskDir.name, { id: taskDir.name, path: taskPath });
-    }
-  }
-  return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
 const CANARY_PATTERN = /terminal-bench-canary GUID ([0-9a-fA-F-]{8,})/g;

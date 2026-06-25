@@ -22,6 +22,26 @@ from harbor.utils.trajectory_utils import format_trajectory_json
 from trial_pricing import estimate_cost, pricing_from_env
 
 
+_HOST_NODE_ENV_ALLOWLIST = {
+    "PATH",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
+}
+
+
+def _host_node_process_env(cell_env: dict[str, str]) -> dict[str, str]:
+    env = {key: value for key in _HOST_NODE_ENV_ALLOWLIST if (value := os.environ.get(key))}
+    env.update(cell_env)
+    return env
+
+
 class MakaAgent(BaseInstalledAgent):
     """Run Maka inside the Harbor task container and expose the shared cell output."""
 
@@ -74,6 +94,16 @@ class MakaAgent(BaseInstalledAgent):
         run_cell = Path(maka_repo) / "packages" / "headless" / "harbor" / "run-cell.mjs"
         run_host_cell = Path(maka_repo) / "packages" / "headless" / "harbor" / "run-host-cell.mjs"
         dist_index = Path(maka_repo) / "packages" / "headless" / "dist" / "index.js"
+        dist_harbor_cell = Path(maka_repo) / "packages" / "headless" / "dist" / "harbor-cell.js"
+        if self._host_side_llm_enabled():
+            await self.exec_as_agent(
+                environment,
+                command=(
+                    f"test -f {shlex.quote(str(run_host_cell))} && "
+                    f"test -f {shlex.quote(str(dist_harbor_cell))}"
+                ),
+            )
+            return
         await self.exec_as_root(
             environment,
             command=(
@@ -186,7 +216,7 @@ class MakaAgent(BaseInstalledAgent):
                 "node",
                 self._run_host_cell_path(),
                 cwd=self._get_env("MAKA_HOST_REPO_ROOT") or os.getcwd(),
-                env={**os.environ, **env},
+                env=_host_node_process_env(env),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
