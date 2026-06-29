@@ -57,6 +57,7 @@ export interface TaskRunExport {
   };
   policy?: {
     heavyTask?: TaskRunProjection['heavyTaskMode'];
+    economyTask?: TaskRunProjection['economyTaskMode'];
   };
   heavyTask?: {
     mode?: TaskRunProjection['heavyTaskMode'];
@@ -155,7 +156,7 @@ export function taskRunExportFromProjection(
   const benchmark = verifierBenchmark(verifier);
   const taxonomy = score?.taxonomy ?? projection.result?.taxonomy ?? legacyResultRecord.errorClass ?? projection.status;
   const primaryWorkspacePath = primaryWorkspacePathFromArtifacts(projection.artifacts);
-  const policy = projection.heavyTaskMode?.enabled ? { heavyTask: projection.heavyTaskMode } : undefined;
+  const policy = policyFromProjection(projection);
   const heavyTask = projection.heavyTaskCompletion
     ? { mode: projection.heavyTaskMode, completion: projection.heavyTaskCompletion }
     : undefined;
@@ -438,6 +439,17 @@ function economyFromDetails(scoreDetails: Record<string, unknown>): TaskRunExpor
     ...(recordValue(budget) && recordValue(budget.totals) ? { tokens: budget.totals as Record<string, unknown> } : {}),
     ...(tools ? { tools } : {}),
   };
+}
+
+function policyFromProjection(projection: TaskRunProjection): TaskRunExport['policy'] {
+  const policy: NonNullable<TaskRunExport['policy']> = {};
+  if (projection.heavyTaskMode?.enabled) {
+    policy.heavyTask = projection.heavyTaskMode;
+  }
+  if (projection.economyTaskMode?.enabled) {
+    policy.economyTask = projection.economyTaskMode;
+  }
+  return Object.keys(policy).length > 0 ? policy : undefined;
 }
 
 function recordValue(value: unknown): value is Record<string, unknown> {

@@ -54,6 +54,19 @@ describe('task run export', () => {
         },
       },
       {
+        type: 'economy_task_mode_recorded',
+        id: 'e4b',
+        taskRunId: 'run-1',
+        ts: 3,
+        facts: {
+          schemaVersion: 1,
+          enabled: true,
+          triggerSource: 'config',
+          triggerReason: 'simple benchmark task',
+          policyVersion: 'maka-economy-task-policy.v1',
+        },
+      },
+      {
         type: 'verifier_result_recorded',
         id: 'e5',
         taskRunId: 'run-1',
@@ -159,6 +172,8 @@ describe('task run export', () => {
     });
     assert.equal(exported.policy?.heavyTask?.enabled, true);
     assert.equal(exported.policy?.heavyTask?.triggerReason, 'long benchmark task');
+    assert.equal(exported.policy?.economyTask?.enabled, true);
+    assert.equal(exported.policy?.economyTask?.triggerReason, 'simple benchmark task');
     assert.equal(exported.isolation.policy?.mode, 'inert_fake_backend');
     assert.equal(exported.taxonomy.value, 'passed');
     assert.equal(exported.legacyResultRecord.passed, true);
@@ -170,7 +185,7 @@ describe('task run export', () => {
     assert.match(markdown, /workspace_diff/);
   });
 
-  test('omits default-off heavy-task policy metadata from compact exports', () => {
+  test('omits default-off task policy metadata from compact exports', () => {
     const exported = taskRunExportFromProjection(projectTaskRun([
       { type: 'task_run_created', id: 'e1', taskRunId: 'run-default', ts: 1, taskId: 'task-1', configId: 'cfg-1' },
       {
@@ -184,6 +199,19 @@ describe('task run export', () => {
           triggerSource: 'default',
           triggerReason: 'heavy-task mode was not explicitly enabled',
           policyVersion: 'maka-heavy-task-policy.v1',
+        },
+      },
+      {
+        type: 'economy_task_mode_recorded',
+        id: 'e3',
+        taskRunId: 'run-default',
+        ts: 2,
+        facts: {
+          schemaVersion: 1,
+          enabled: false,
+          triggerSource: 'default',
+          triggerReason: 'economy-task mode was not explicitly enabled',
+          policyVersion: 'maka-economy-task-policy.v1',
         },
       },
     ], 'run-default'));

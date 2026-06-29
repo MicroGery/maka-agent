@@ -23,7 +23,7 @@ const HOST_BACKEND_ENV_KEYS = [
   'MAKA_OUTPUT_DIR',
   'MAKA_STORAGE_ROOT',
 ];
-export async function main() {
+export async function main(options = {}) {
   const env = process.env;
   const provider = env.MAKA_PROVIDER || providerFromModel(env.MAKA_MODEL || env.HARBOR_MODEL || 'deepseek/deepseek-v4-flash');
   const model = env.MAKA_MODEL || stripProvider(env.HARBOR_MODEL || 'deepseek/deepseek-v4-flash', provider);
@@ -42,6 +42,7 @@ export async function main() {
       llmConnectionSlug: env.MAKA_LLM_CONNECTION_SLUG || provider,
       model,
       ...(env.MAKA_SYSTEM_PROMPT !== undefined ? { systemPrompt: env.MAKA_SYSTEM_PROMPT } : {}),
+      ...(env.MAKA_ECONOMY_TASK_MODE === 'true' ? { economyTaskMode: true } : {}),
     },
     instruction: await instructionFromEnv(env),
     cwd: env.MAKA_WORKDIR || process.cwd(),
@@ -49,7 +50,7 @@ export async function main() {
     storageRoot,
     ...(contextBudgetPolicy ? { contextBudgetPolicy } : {}),
     ...(continuationPolicy ? { continuationPolicy } : {}),
-    registerBackends: buildAiSdkCellBackendRegistration({
+    registerBackends: options.registerBackends ?? buildAiSdkCellBackendRegistration({
       provider,
       model,
       env: await backendEnv({ ...env, MAKA_OUTPUT_DIR: outputDir, MAKA_STORAGE_ROOT: storageRoot }, provider),

@@ -120,7 +120,8 @@ describe('economy-task policy', () => {
     assert.match(prompt, /Do not use ls -la/);
     assert.match(prompt, /Read at most 5 lines from at most 2 sample files/);
     assert.match(prompt, /Write one focused script/);
-    assert.match(prompt, /Do not run grep, wc, sort, uniq/);
+    assert.match(prompt, /one lightweight targeted preview/);
+    assert.match(prompt, /avoid repeated grep, wc, sort, uniq/);
     assert.match(prompt, /benchmark verifier will check correctness independently/);
   });
 

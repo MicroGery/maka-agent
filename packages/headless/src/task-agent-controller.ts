@@ -200,6 +200,13 @@ export async function runTaskOnce(
     facts: heavyTaskMode,
   });
   await appendTaskEvent(taskRunStore, taskRunId, {
+    type: 'economy_task_mode_recorded',
+    id: newId(),
+    taskRunId,
+    ts: now(),
+    facts: economyTaskMode,
+  });
+  await appendTaskEvent(taskRunStore, taskRunId, {
     type: 'isolation_policy_recorded',
     id: newId(),
     taskRunId,

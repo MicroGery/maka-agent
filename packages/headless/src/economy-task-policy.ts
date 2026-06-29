@@ -121,7 +121,8 @@ export function buildEconomyTaskSystemPromptPolicy(
     '- Do not use ls -la. If you must confirm a path, use ls without flags, or read a tiny sample.',
     '- Read at most 5 lines from at most 2 sample files to understand the format, then stop reading.',
     '- Write one focused script that produces the required output file, run it once, and stop.',
-    '- Once the required output file exists, stop immediately. Do not run grep, wc, sort, uniq, or any other verification command.',
+    '- After the required output file exists, run at most one lightweight targeted preview, such as reading the first few output lines or checking a header/row count.',
+    '- After that one preview, stop. avoid repeated grep, wc, sort, uniq, recursive scans, or broad verification loops.',
     '- The benchmark verifier will check correctness independently; your job is only to produce the required artifact.',
   ].join('\n');
 }

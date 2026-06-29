@@ -392,6 +392,32 @@ describe('runTaskOnce', () => {
     });
   });
 
+  test('records config economy-task mode selection without changing scoring authority', async () => {
+    await withDirs(async (fixtureDir, storageRoot) => {
+      await writeFile(join(fixtureDir, 'marker.txt'), 'present', 'utf8');
+      const task: Task = {
+        id: 'economy-task',
+        instruction: 'write a csv summary',
+        workspaceDir: fixtureDir,
+        verification: { command: 'test -f marker.txt', protectedPaths: [] },
+      };
+
+      const result = await runTaskOnce({
+        ...fakeConfig,
+        economyTaskMode: { enabled: true, reason: 'declared simple task' },
+      }, task, {
+        storageRoot,
+        registerBackends: registerFakeBackend,
+      });
+
+      assert.equal(result.projection.economyTaskMode?.enabled, true);
+      assert.equal(result.projection.economyTaskMode?.triggerSource, 'config');
+      assert.equal(result.projection.economyTaskMode?.triggerReason, 'declared simple task');
+      assert.equal(result.projection.latestScoreResult?.taxonomy, 'passed');
+      assert.equal(result.resultRecord.passed, true);
+    });
+  });
+
   test('enabled heavy-task run exposes progress tools and records submitted snapshots', async () => {
     await withDirs(async (fixtureDir, storageRoot) => {
       await writeFile(join(fixtureDir, 'README.md'), 'public task notes\n', 'utf8');
