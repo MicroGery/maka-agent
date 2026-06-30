@@ -32,6 +32,7 @@ export async function main(options = {}) {
   const contextEnv = normalizeHarborCellContextEnv(env);
   const contextBudgetPolicy = buildHarborCellContextBudgetPolicySnapshot(contextEnv);
   const continuationPolicy = buildHarborCellContinuationPolicy(env);
+  const economyTaskMode = economyTaskModeFromEnv(env.MAKA_ECONOMY_TASK_MODE);
   const now = Date.now;
   const newId = randomId;
 
@@ -42,7 +43,7 @@ export async function main(options = {}) {
       llmConnectionSlug: env.MAKA_LLM_CONNECTION_SLUG || provider,
       model,
       ...(env.MAKA_SYSTEM_PROMPT !== undefined ? { systemPrompt: env.MAKA_SYSTEM_PROMPT } : {}),
-      ...(env.MAKA_ECONOMY_TASK_MODE === 'true' ? { economyTaskMode: true } : {}),
+      ...(economyTaskMode !== undefined ? { economyTaskMode } : {}),
     },
     instruction: await instructionFromEnv(env),
     cwd: env.MAKA_WORKDIR || process.cwd(),
@@ -72,6 +73,12 @@ export async function main(options = {}) {
     outputPath: result.outputPath,
     runtimeEventsPath: result.runtimeEventsPath,
   }));
+}
+
+function economyTaskModeFromEnv(value) {
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return undefined;
 }
 
 export async function backendEnv(env, provider) {

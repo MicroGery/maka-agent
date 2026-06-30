@@ -336,6 +336,7 @@ describe('runTaskOnce', () => {
             'task_run_created',
             'task_run_queued',
             'heavy_task_mode_recorded',
+            'economy_task_mode_recorded',
             'isolation_policy_recorded',
             'workspace_lease_recorded',
             'tool_executor_identity_recorded',

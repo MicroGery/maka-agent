@@ -380,11 +380,12 @@ export async function runHarborCellFromEnv(
   const backend = backendFromEnv(resolvedEnv.MAKA_BACKEND);
   const contextBudgetPolicy = buildHarborCellContextBudgetPolicySnapshot(resolvedEnv);
   const continuationPolicy = buildHarborCellContinuationPolicy(resolvedEnv);
+  const economyTaskMode = economyTaskModeFromEnv(resolvedEnv.MAKA_ECONOMY_TASK_MODE);
   const baseConfig = {
     id: resolvedEnv.MAKA_CONFIG_ID ?? 'harbor-cell',
     backend,
     ...(resolvedEnv.MAKA_SYSTEM_PROMPT !== undefined ? { systemPrompt: resolvedEnv.MAKA_SYSTEM_PROMPT } : {}),
-    ...(resolvedEnv.MAKA_ECONOMY_TASK_MODE === 'true' ? { economyTaskMode: true } : {}),
+    ...(economyTaskMode !== undefined ? { economyTaskMode } : {}),
   };
   let config: Config;
   let registerBackends = options.registerBackends;
@@ -469,6 +470,12 @@ export async function runHarborCellFromEnv(
     ...(options.now ? { now: options.now } : {}),
     ...(options.newId ? { newId: options.newId } : {}),
   });
+}
+
+function economyTaskModeFromEnv(value: string | undefined): boolean | undefined {
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return undefined;
 }
 
 export function buildHarborCellContinuationPolicy(

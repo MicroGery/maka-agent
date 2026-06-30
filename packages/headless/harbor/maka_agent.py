@@ -269,6 +269,9 @@ class MakaAgent(BaseInstalledAgent):
         model = self.model_name or self._get_env("MAKA_MODEL") or "deepseek/deepseek-v4-flash"
         backend = self._harbor_backend()
         provider = self._resolved_flags.get("provider", "") or self._get_env("MAKA_PROVIDER") or ""
+        economy_task_flag = self._resolved_flags.get("economy_task_mode")
+        economy_task_env = self._get_env("MAKA_ECONOMY_TASK_MODE")
+        economy_task_mode = True if economy_task_flag is True else economy_task_env == "true"
         if backend == "ai-sdk" and not self._host_side_llm_enabled():
             raise RuntimeError("backend=ai-sdk requires MAKA_HOST_API_KEY or MAKA_HOST_API_KEY_FILE")
         env = {
@@ -278,7 +281,7 @@ class MakaAgent(BaseInstalledAgent):
             "MAKA_SYSTEM_PROMPT": system_prompt,
             "MAKA_OUTPUT_DIR": EnvironmentPaths.agent_dir.as_posix(),
             "MAKA_STORAGE_ROOT": (EnvironmentPaths.agent_dir / "maka-storage").as_posix(),
-            "MAKA_ECONOMY_TASK_MODE": "true" if self._resolved_flags.get("economy_task_mode") else "false",
+            "MAKA_ECONOMY_TASK_MODE": "true" if economy_task_mode else "false",
         }
         if provider:
             env["MAKA_PROVIDER"] = provider
