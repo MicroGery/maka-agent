@@ -3,13 +3,14 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { describe, it } from 'node:test';
 import { readRendererContractCss } from './contract-css-helpers.js';
+import { readMainProcessCombinedSource } from './main-process-contract-source-helpers.js';
 import { readRendererShellCombinedSource } from './renderer-shell-source-helpers.js';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../../../../..');
 
 describe('Daily Review export-to-file contract (PR-DAILY-REVIEW-EXPORT-FILE-0)', () => {
   it('exposes the save-to-file IPC, preload bridge, and command palette entry', async () => {
-    const main = await readFile(resolve(REPO_ROOT, 'apps/desktop/src/main/main.ts'), 'utf8');
+    const main = await readMainProcessCombinedSource();
     const preload = await readFile(resolve(REPO_ROOT, 'apps/desktop/src/preload/preload.ts'), 'utf8');
     const palette = await readFile(resolve(REPO_ROOT, 'apps/desktop/src/renderer/command-palette.tsx'), 'utf8');
     const renderer = await readRendererShellCombinedSource();
@@ -51,7 +52,7 @@ describe('Daily Review export-to-file contract (PR-DAILY-REVIEW-EXPORT-FILE-0)',
   });
 
   it('clamps the save payload size so a renderer cannot force a large write', async () => {
-    const main = await readFile(resolve(REPO_ROOT, 'apps/desktop/src/main/main.ts'), 'utf8');
+    const main = await readMainProcessCombinedSource();
     // 1MB cap on markdown body; 200 chars on filename. These are
     // defensive against a misbehaving / hijacked renderer, not product
     // UX constraints — daily reviews are typically well under 100KB.
@@ -65,7 +66,7 @@ describe('Daily Review export-to-file contract (PR-DAILY-REVIEW-EXPORT-FILE-0)',
     // path-traversal text. The source contains
     // `defaultName.replace(/[\\/]/g, '_')` — escaped backslash + slash
     // inside a character class.
-    const main = await readFile(resolve(REPO_ROOT, 'apps/desktop/src/main/main.ts'), 'utf8');
+    const main = await readMainProcessCombinedSource();
     assert.equal(
       main.includes("defaultName.replace(/[\\\\/]/g, '_')"),
       true,

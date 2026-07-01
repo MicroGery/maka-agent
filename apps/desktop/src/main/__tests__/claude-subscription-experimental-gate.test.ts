@@ -19,6 +19,7 @@ import { readFile } from 'node:fs/promises';
 import { describe, it } from 'node:test';
 import { resolve } from 'node:path';
 import { readProviderSettingsCombinedSource } from './provider-contract-source-helpers.js';
+import { readMainProcessCombinedSource } from './main-process-contract-source-helpers.js';
 
 const REPO_ROOT = resolve(process.cwd(), '..', '..');
 const SERVICE_SOURCE = resolve(
@@ -30,7 +31,6 @@ const SERVICE_SOURCE = resolve(
   'oauth',
   'claude-subscription-service.ts',
 );
-const MAIN_SOURCE = resolve(REPO_ROOT, 'apps', 'desktop', 'src', 'main', 'main.ts');
 const SETTINGS_SOURCE = resolve(
   REPO_ROOT,
   'apps',
@@ -67,7 +67,7 @@ describe('experimental kill-switch (kenji 1da909d5 + 45b31e16)', () => {
   });
 
   it('main.ts IPC auth handlers re-check the experimental flag (not just UI)', async () => {
-    const src = await readFile(MAIN_SOURCE, 'utf8');
+    const src = await readMainProcessCombinedSource();
     // The handlers MUST not just trust the renderer to hide the
     // card. Each of these handlers must guard with the flag.
     const handlers = [
@@ -98,7 +98,7 @@ describe('experimental kill-switch (kenji 1da909d5 + 45b31e16)', () => {
   });
 
   it('main.ts disabled response uses experimental_disabled, not provider_rejected', async () => {
-    const src = await readFile(MAIN_SOURCE, 'utf8');
+    const src = await readMainProcessCombinedSource();
     // The shared disabled response constant must use the dedicated
     // reason. We accept the literal string presence as proxy for
     // the field value.
@@ -303,7 +303,7 @@ describe('Claude OAuth authorize URL compatibility', () => {
 
 describe('Claude OAuth model connection bridge', () => {
   it('main syncs successful Claude OAuth login into the model connection list', async () => {
-    const src = await readFile(MAIN_SOURCE, 'utf8');
+    const src = await readMainProcessCombinedSource();
     assert.match(
       src,
       /async function syncClaudeSubscriptionConnection\(\)/,
@@ -318,7 +318,7 @@ describe('Claude OAuth model connection bridge', () => {
     const completeIdx = src.indexOf("claude-subscription:complete-authorization");
     assert.notEqual(completeIdx, -1, 'complete-authorization handler must exist');
     const completeRegion = src.slice(completeIdx, completeIdx + 1200);
-    assert.match(completeRegion, /if\s*\(\s*result\.ok\s*\)\s*\{[\s\S]*await syncClaudeSubscriptionConnection\(\);[\s\S]*emitConnectionListChanged\(\);/, 'successful OAuth completion must sync the connection and notify renderer');
+    assert.match(completeRegion, /if\s*\(\s*result\.ok\s*\)\s*\{[\s\S]*await (?:deps\.)?syncClaudeSubscriptionConnection\(\);[\s\S]*(?:deps\.)?emitConnectionListChanged\(\);/, 'successful OAuth completion must sync the connection and notify renderer');
 
     const listIdx = src.indexOf("connections:list");
     assert.notEqual(listIdx, -1, 'connections:list handler must exist');
@@ -327,7 +327,7 @@ describe('Claude OAuth model connection bridge', () => {
   });
 
   it('OAuth model connection sync is per-provider fail-soft', async () => {
-    const src = await readFile(MAIN_SOURCE, 'utf8');
+    const src = await readMainProcessCombinedSource();
     const syncMatch = src.match(/async function syncOAuthModelConnections\(\): Promise<void> \{[\s\S]*?\n\}/);
     assert.ok(syncMatch, 'syncOAuthModelConnections helper must exist');
     assert.match(
@@ -343,7 +343,7 @@ describe('Claude OAuth model connection bridge', () => {
   });
 
   it('model connection IPC resolves Claude OAuth token from the subscription service, not credentialStore api_key', async () => {
-    const src = await readFile(MAIN_SOURCE, 'utf8');
+    const src = await readMainProcessCombinedSource();
     assert.match(
       src,
       /async function resolveConnectionSecret\(slug:\s*string\)[\s\S]*providerType === 'claude-subscription'[\s\S]*claudeSubscription\.getAccessTokenInternal\(\)/,
@@ -356,7 +356,7 @@ describe('Claude OAuth model connection bridge', () => {
   });
 
   it('model connection IPC does not accept custom baseUrl overrides for OAuth-token providers', async () => {
-    const src = await readFile(MAIN_SOURCE, 'utf8');
+    const src = await readMainProcessCombinedSource();
     assert.match(
       src,
       /function normalizeCreateConnectionInput\(input:\s*CreateConnectionInput\):\s*CreateConnectionInput[\s\S]*defaults\.authKind === 'oauth_token'[\s\S]*baseUrl:\s*defaults\.baseUrl/,
@@ -374,13 +374,13 @@ describe('Claude OAuth model connection bridge', () => {
     );
     assert.match(
       src,
-      /const normalizedPatch = await normalizeUpdateConnectionInput\(slug,\s*patch\)/,
+      /const normalizedPatch = await normalizeUpdateConnectionInput\(deps,\s*slug,\s*patch\)/,
       'connections:update must use the provider-aware baseUrl normalizer',
     );
   });
 
   it('main syncs successful Codex OAuth login into the model connection list', async () => {
-    const src = await readFile(MAIN_SOURCE, 'utf8');
+    const src = await readMainProcessCombinedSource();
     assert.match(
       src,
       /async function syncCodexSubscriptionConnection\(\)/,
@@ -411,7 +411,7 @@ describe('Claude OAuth model connection bridge', () => {
     const completeRegion = src.slice(completeIdx, completeIdx + 1200);
     assert.match(
       completeRegion,
-      /if\s*\(\s*result\.ok\s*\)\s*\{[\s\S]*await syncCodexSubscriptionConnection\(\);[\s\S]*emitConnectionListChanged\(\);/,
+      /if\s*\(\s*result\.ok\s*\)\s*\{[\s\S]*await (?:deps\.)?syncCodexSubscriptionConnection\(\);[\s\S]*(?:deps\.)?emitConnectionListChanged\(\);/,
       'successful Codex OAuth completion must sync the connection and notify renderer',
     );
     assert.match(
