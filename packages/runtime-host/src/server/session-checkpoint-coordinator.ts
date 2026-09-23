@@ -66,6 +66,7 @@ export interface PublishedHostSessionCheckpoint {
   readonly binding: SessionCheckpointBinding;
   readonly committed: CommittedSessionRevision;
   readonly stagingCleanup: 'released' | 'pending_recovery';
+  readonly bundleCleanup: 'released' | 'pending_recovery';
 }
 export interface HostSessionCheckpointPublication {
   publish(input: PublishHostSessionCheckpointInput): Promise<PublishedHostSessionCheckpoint>;
@@ -115,6 +116,10 @@ export class HostSessionCheckpointCoordinator implements HostSessionCheckpointPu
     }
     // Cooperative deadline for the whole attempt, not part of commit identity.
     const deadlineAt = Math.min(accepted.deadlineAt ?? Infinity, Date.now() + 60_000);
+    if (deadlineAt <= Date.now())
+      return Promise.reject(
+        new HostCheckpointError('cancelled', 'Checkpoint deadline has expired'),
+      );
     const timer = AbortSignal.timeout(Math.max(0, deadlineAt - Date.now()));
     const signal = AbortSignal.any([
       timer,
@@ -149,6 +154,26 @@ export class HostSessionCheckpointCoordinator implements HostSessionCheckpointPu
     signal.throwIfAborted();
     return deps.journal.withSession(input.sessionId, async (document, save) => {
       signal.throwIfAborted();
+      const releaseBundle = async (position: number): Promise<'released' | 'pending_recovery'> => {
+        const pending = document.requests[position]!;
+        if (!pending.bundleCleanupPending) return 'released';
+        try {
+          await deps.cleanupBundle(pending.commitId);
+          const { bundleCleanupPending: _pending, ...released } = pending;
+          document.requests[position] = released;
+          try {
+            await save();
+          } catch (error) {
+            document.requests[position] = pending;
+            throw error;
+          }
+          return 'released';
+        } catch {
+          // The terminal outcome is already durable. Retain cleanup ownership
+          // for the next request/restart, without changing that outcome.
+          return 'pending_recovery';
+        }
+      };
       let index = document.requests.findIndex((request) => request.requestId === input.requestId);
       let request = document.requests[index];
       if (request && request.confirmationGrantId !== input.confirmationGrantId) {
@@ -161,10 +186,11 @@ export class HostSessionCheckpointCoordinator implements HostSessionCheckpointPu
       // Its bytes were never durably fixed, so the identity can only be aborted.
       for (let position = 0; position < document.requests.length; position++) {
         const previous = document.requests[position]!;
-        if (previous.phase !== 'capturing') continue;
-        document.requests[position] = { ...previous, phase: 'aborted' };
-        await save();
-        await deps.cleanupBundle(previous.commitId);
+        if (previous.phase === 'capturing') {
+          document.requests[position] = { ...previous, phase: 'aborted' };
+          await save();
+        }
+        if (previous.phase !== 'prepared') await releaseBundle(position);
       }
       request = document.requests[index];
       if (request?.phase === 'aborted') {
@@ -200,6 +226,7 @@ export class HostSessionCheckpointCoordinator implements HostSessionCheckpointPu
           commitId: randomUUID(),
           ...(input.confirmationGrantId ? { confirmationGrantId: input.confirmationGrantId } : {}),
           expectedRevision: current?.ref.revision ?? null,
+          bundleCleanupPending: true,
           phase: 'capturing',
         };
         index = document.requests.length;
@@ -234,12 +261,12 @@ export class HostSessionCheckpointCoordinator implements HostSessionCheckpointPu
       if (request.phase === 'committed') {
         await deps.objects.assertReadable(request.checkpoint.manifest);
         await deps.objects.assertReadable(request.checkpoint.value.compatibilityBundle);
-        await deps.cleanupBundle(request.commitId);
         return structuredClone({
           requestId: request.requestId,
           binding: document.binding,
           committed: request.result,
           stagingCleanup: request.snapshotCleanupPending ? 'pending_recovery' : 'released',
+          bundleCleanup: request.bundleCleanupPending ? 'pending_recovery' : 'released',
         });
       }
       if (request.phase !== 'prepared')
@@ -290,6 +317,7 @@ export class HostSessionCheckpointCoordinator implements HostSessionCheckpointPu
         ) {
           document.requests[index] = { ...request, phase: 'conflicted' };
           await save();
+          await releaseBundle(index);
         }
         throw error;
       }
@@ -300,12 +328,13 @@ export class HostSessionCheckpointCoordinator implements HostSessionCheckpointPu
       };
       document.requests[index] = completed;
       await save();
-      await deps.cleanupBundle(request.commitId);
+      const bundleCleanup = await releaseBundle(index);
       return structuredClone({
         requestId: request.requestId,
         binding: document.binding,
         committed,
         stagingCleanup: request.snapshotCleanupPending ? 'pending_recovery' : 'released',
+        bundleCleanup,
       });
     });
   }

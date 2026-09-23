@@ -180,7 +180,7 @@ Capture takes Host Session admission, the Runtime mutation lane, the selected pr
 - A `prepared` request retries only its recorded checkpoint. A different request waits for that outcome to be reconciled.
 - A lost creation reply is reconciled only against the exact binding and checkpoint. A commit retries its original Repository commit identity.
 - A definitive CAS conflict is retained as `conflicted`; retry never rebases that old snapshot onto a newer Head.
-- `committed` receipts replay the original result even if live state or the Head has advanced. `stagingCleanup: pending_recovery` reports a separate cleanup failure, not a failed publication.
+- `committed` receipts replay the original committed revision even if live state or the Head has advanced. `stagingCleanup: pending_recovery` records a snapshot staging cleanup failure; `bundleCleanup` reports the latest temporary archive cleanup attempt. Neither turns a committed publication into a failure. Terminal requests retain archive cleanup ownership until cleanup succeeds; later requests reconcile it without deleting prepared inputs or immutable objects.
 
 Tests exercise real Host capture and codec hydration for inspection, pending-admission/secret/shared-workspace refusal, backend selection, complete-copy fencing, independent-process Repository races, and real Host termination before/after Head replacement. Inspection in those tests does not implement PR3 Runtime activation or establish whole-WorkHub restore safety.
 

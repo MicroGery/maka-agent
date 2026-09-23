@@ -43,6 +43,8 @@ async function fixture() {
   let captures = 0;
   let captureFailure = false;
   let cleanupPending = false;
+  let bundleCleanupFailure = false;
+  const cleanedBundles: string[] = [];
   const artifact = async (name: string) => {
     const path = join(root, name);
     const bytes = Buffer.from('opaque test bundle ' + name);
@@ -75,7 +77,11 @@ async function fixture() {
         if (captureFailure) throw new Error('capture interrupted');
         return artifact(commitId);
       },
-      cleanupBundle: async () => {},
+      cleanupBundle: async (commitId) => {
+        if (bundleCleanupFailure) throw new Error('temporary bundle cleanup unavailable');
+        await rm(join(root, commitId), { force: true });
+        cleanedBundles.push(commitId);
+      },
       runAuthorized: (operation) => operation(),
     });
   return {
@@ -86,6 +92,10 @@ async function fixture() {
     make,
     artifact,
     captures: () => captures,
+    cleanedBundles,
+    failBundleCleanup: (fail: boolean) => {
+      bundleCleanupFailure = fail;
+    },
     failCapture: () => {
       captureFailure = true;
     },
@@ -142,6 +152,16 @@ for (const method of ['createSession', 'commit'] as const) {
         assert.equal(document.requests.at(-1)?.phase, 'prepared');
       });
       first = f.make();
+      await assert.rejects(
+        first.publish({ sessionId: 'session', requestId: 'blocked' }),
+        code('busy'),
+      );
+      await f.journal.withSession('session', async (document) => {
+        assert.ok(
+          await readFile(join(f.root, document.requests.at(-1)!.commitId)),
+          'a prepared input is not terminal cleanup',
+        );
+      });
       const recovered = await first.publish({ sessionId: 'session', requestId: 'lost' });
       assert.equal(f.captures(), count);
       assert.equal(recovered.committed.ref.revision, initial ? 'r2' : 'r1');
@@ -346,6 +366,71 @@ test('successful publication reports persisted staging cleanup status separately
   }
 });
 
+test('post-commit bundle cleanup failure reports the committed receipt and is recoverable', async () => {
+  const f = await fixture();
+  let coordinator = f.make();
+  try {
+    f.failBundleCleanup(true);
+    const result = await coordinator.publish({ sessionId: 'session', requestId: 'cleanup' });
+    assert.equal(result.committed.ref.revision, 'r1');
+    assert.equal(Reflect.get(result, 'bundleCleanup'), 'pending_recovery');
+    assert.deepEqual(
+      await f.repository.checkoutCurrent(result.binding.repositorySessionId),
+      result.committed,
+    );
+    await coordinator.close();
+    f.failBundleCleanup(false);
+    coordinator = f.make();
+    const replay = await coordinator.publish({ sessionId: 'session', requestId: 'cleanup' });
+    assert.deepEqual(replay.committed, result.committed);
+    assert.equal(Reflect.get(replay, 'bundleCleanup'), 'released');
+    assert.equal(f.captures(), 1);
+    assert.equal(f.cleanedBundles.length, 1);
+  } finally {
+    await coordinator.close();
+    await f.close();
+  }
+});
+
+test('CAS conflict cleans only its owned temporary bundle and retries interrupted cleanup', async () => {
+  const f = await fixture();
+  let coordinator = f.make();
+  try {
+    await coordinator.publish({ sessionId: 'session', requestId: 'initial' });
+    await coordinator.close();
+    coordinator = f.make(
+      intercept(f.repository, {
+        commit: async (input) => {
+          await f.repository.commit({ ...input, commitId: 'other-writer' });
+          return f.repository.commit(input);
+        },
+      }),
+    );
+    f.failBundleCleanup(true);
+    await assert.rejects(
+      coordinator.publish({ sessionId: 'session', requestId: 'conflict' }),
+      code('conflict'),
+    );
+    let commitId = '';
+    await f.journal.withSession('session', async (document) => {
+      commitId = document.requests.at(-1)!.commitId;
+    });
+    assert.ok(await readFile(join(f.root, commitId)));
+    await coordinator.close();
+    f.failBundleCleanup(false);
+    coordinator = f.make();
+    await assert.rejects(
+      coordinator.publish({ sessionId: 'session', requestId: 'conflict' }),
+      code('conflict'),
+    );
+    await assert.rejects(readFile(join(f.root, commitId)), { code: 'ENOENT' });
+    assert.ok(f.cleanedBundles.includes(commitId));
+  } finally {
+    await coordinator.close();
+    await f.close();
+  }
+});
+
 test('journal reserves receipt capacity before committing a new Head', async () => {
   const f = await fixture();
   const coordinator = f.make();
@@ -380,6 +465,20 @@ test('cancellation and close reject admission without any snapshot', async () =>
   const f = await fixture();
   const coordinator = f.make();
   try {
+    const originalFiles = await readdir(f.directory);
+    await assert.rejects(
+      coordinator.publish({
+        sessionId: 'session',
+        requestId: 'expired',
+        deadlineAt: Date.now() - 1,
+      }),
+      code('cancelled'),
+    );
+    assert.deepEqual(
+      await readdir(f.directory),
+      originalFiles,
+      'an expired request must not reserve a journal identity',
+    );
     await assert.rejects(
       coordinator.publish({
         sessionId: 'session',

@@ -45,6 +45,7 @@ export type CheckpointPublicationRequest = {
   readonly confirmationGrantId?: string;
   readonly expectedRevision: string | null;
   readonly snapshotCleanupPending?: true;
+  readonly bundleCleanupPending?: true;
 } & (
   | { readonly phase: 'capturing' }
   | { readonly phase: 'aborted' }
@@ -164,6 +165,7 @@ function decode(
       commits.has(request.commitId) ||
       !(request.expectedRevision === null || identifier(request.expectedRevision)) ||
       !(request.snapshotCleanupPending === undefined || request.snapshotCleanupPending === true) ||
+      !(request.bundleCleanupPending === undefined || request.bundleCleanupPending === true) ||
       !(request.confirmationGrantId === undefined || identifier(request.confirmationGrantId))
     )
       throw invalid();
