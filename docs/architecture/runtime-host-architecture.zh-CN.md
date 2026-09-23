@@ -180,7 +180,7 @@ Host control directory 的 `session-checkpoints-v1/` 保存 file Repository、�
 - `prepared` 请求只能重试原固定 checkpoint，其他新请求需等待它协调完成。
 - 创建回执丢失时严格核对原绑定和确切 checkpoint；普通 commit 复用原 Repository commit 身份。
 - 确定的 CAS 冲突记录为 `conflicted`，不将旧快照自动重挂到新 Head。
-- `committed` 收据返回原结果，即便 live state 或 Head 已继续推进。`stagingCleanup: pending_recovery` 单独报告暂存清理失败，不将已完成发布冒充失败。
+- `committed` 收据返回原提交版本，即便 live state 或 Head 已继续推进。`stagingCleanup: pending_recovery` 记录快照暂存清理失败，`bundleCleanup` 表示最近一次临时归档包清理结果，均不把已完成发布冒充失败。终态请求在清理成功前保留归档清理责任，后续请求继续协调，不删除 prepared 输入或不可变对象。
 
 测试覆盖真实 Host capture/codec 检查性解包、待处理消息/Secret/共享目录拒绝、后端选择、完整复制排他、独立进程 Repository 竞争，以及更新 Head 前后强杀真实 Host。测试中的检查性解包不等于 PR3 的 Runtime 激活，也不证明完整 WorkHub 的恢复安全。
 
