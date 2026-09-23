@@ -184,6 +184,8 @@ Host control directory 的 `session-checkpoints-v1/` 保存 file Repository、�
 
 测试覆盖真实 Host capture/codec 检查性解包、待处理消息/Secret/共享目录拒绝、后端选择、完整复制排他、独立进程 Repository 竞争，以及更新 Head 前后强杀真实 Host。测试中的检查性解包不等于 PR3 的 Runtime 激活，也不证明完整 WorkHub 的恢复安全。
 
+可选的 [checkpoint 性能基线](session-checkpoint-performance.md) 将整个存储根的写入冻结窗口与打包／发布分开测量，记录可复现夹具及 RSS／磁盘测量的局限；不承诺零影响，也不启用自动 checkpoint。
+
 ## 5. Root admission 与执行结果
 
 ### 5.1 两层串行化

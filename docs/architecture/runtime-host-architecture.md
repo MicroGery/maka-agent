@@ -184,6 +184,8 @@ Capture takes Host Session admission, the Runtime mutation lane, the selected pr
 
 Tests exercise real Host capture and codec hydration for inspection, pending-admission/secret/shared-workspace refusal, backend selection, complete-copy fencing, independent-process Repository races, and real Host termination before/after Head replacement. Inspection in those tests does not implement PR3 Runtime activation or establish whole-WorkHub restore safety.
 
+The opt-in [checkpoint performance baseline](session-checkpoint-performance.md) measures the root-wide fence separately from packing/publication, with repeatable fixtures and explicit RSS/disk measurement limits. It does not promise zero impact or enable automatic checkpoints.
+
 ## 5. Root admission and execution results
 
 ### 5.1 Two levels of serialization
