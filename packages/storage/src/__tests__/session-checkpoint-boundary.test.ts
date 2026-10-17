@@ -25,6 +25,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setImmediate } from 'node:timers/promises';
 import { test } from 'node:test';
+import { eventWaitDeliveryKey, type EventWaitRecord } from '@maka/core/event-wait';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '../root-authority.js';
 import { openInteractiveExecutionStoresForWrite } from '../execution-stores.js';
 import { exportSessionBundleState } from '../session-bundle-policy.js';
@@ -37,6 +38,127 @@ function deferred() {
     resolve = r;
   });
   return { promise, resolve };
+}
+for (const failCopy of [false, true]) {
+  test(`snapshot fences every event-wait mutation and releases on ${failCopy ? 'failure' : 'success'}`, async () => {
+    const base = await mkdtemp(join(tmpdir(), 'maka-checkpoint-waits-'));
+    const owner = await tryAcquireInteractiveRootOwner(
+      await resolveStorageRoot({ path: join(base, 'state'), kind: 'interactive' }),
+    );
+    assert.ok(owner);
+    const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+    const entered = deferred();
+    const release = deferred();
+    let snapshot: Promise<unknown> | undefined;
+    let writes: Promise<unknown>[] = [];
+    try {
+      const session = await stores.sessionStore.create({
+        cwd: base,
+        llmConnectionSlug: 'test',
+        model: 'test',
+        permissionMode: 'ask',
+      });
+      const record: EventWaitRecord = {
+        schemaVersion: 1,
+        waitId: 'wait-1',
+        sessionId: session.id,
+        goalControlLease: { goalId: 'goal-1', generation: 0 },
+        sourceTurnId: 'turn-1',
+        sourceToolCallId: 'call-1',
+        resource: {
+          providerId: 'test',
+          connectionId: null,
+          resourceType: 'task',
+          resourceId: 'task-1',
+        },
+        condition: { typeId: 'terminal', version: 1, parameters: {} },
+        deliveryKey: eventWaitDeliveryKey('wait-1'),
+        createdAt: 10,
+        updatedAt: 10,
+        deadlineAt: 100,
+        status: 'waiting',
+      };
+      const completedSource = { providerId: 'completed', connectionId: null, token: 'dispatch-1' };
+      await stores.eventWaitStore.reserveSourceDispatch({
+        ...completedSource,
+        observedAt: 10,
+        until: 40,
+      });
+      assert.ok(stores.snapshot);
+      snapshot = stores.snapshot.runExclusive(async () => {
+        entered.resolve();
+        await release.promise;
+        if (failCopy) throw new Error('copy failed');
+      });
+      // Observe failures immediately, including assertions that abort this test.
+      void snapshot.catch(() => {});
+      await entered.promise;
+      const finished: number[] = [];
+      writes = [
+        stores.eventWaitStore.commit({
+          sessionId: session.id,
+          waitId: record.waitId,
+          record,
+          expectedAuthorityRevision: null,
+        }),
+        stores.eventWaitStore.extendSourceCooldown({
+          providerId: 'cooldown',
+          connectionId: null,
+          observedAt: 10,
+          until: 90,
+        }),
+        stores.eventWaitStore.reserveSourceDispatch({
+          providerId: 'reserved',
+          connectionId: null,
+          token: 'dispatch-2',
+          observedAt: 10,
+          until: 50,
+        }),
+        stores.eventWaitStore.completeSourceDispatch({
+          ...completedSource,
+          observedAt: 20,
+          until: 60,
+        }),
+      ].map((write, index) =>
+        write.then((result) => {
+          finished.push(index);
+          return result;
+        }),
+      );
+      await setImmediate();
+      assert.deepEqual(
+        finished,
+        [],
+        'all four mutation paths must wait for the entire private copy',
+      );
+      release.resolve();
+      if (failCopy) await assert.rejects(snapshot, /copy failed/);
+      else await snapshot;
+      const results = await Promise.all(writes);
+      assert.deepEqual(results.slice(1), [90, true, 60]);
+      assert.equal(
+        (await stores.eventWaitStore.read({ sessionId: session.id, waitId: record.waitId }))?.record
+          .status,
+        'waiting',
+      );
+      await stores.sessionStore.close?.();
+      await assert.rejects(
+        stores.eventWaitStore.commit({
+          sessionId: session.id,
+          waitId: record.waitId,
+          record,
+          expectedAuthorityRevision: 0,
+        }),
+      );
+    } finally {
+      release.resolve();
+      await Promise.allSettled([...(snapshot ? [snapshot] : []), ...writes]);
+      await stores.sessionStore.close?.();
+      await owner.close();
+      await rm(owner.controlDirectory, { recursive: true, force: true });
+      await rm(base, { recursive: true, force: true });
+    }
+  });
 }
 test('live state export fences managed-context maintenance through its private copy', {
   timeout: 10_000,

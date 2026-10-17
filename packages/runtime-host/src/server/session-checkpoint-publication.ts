@@ -18,7 +18,7 @@
  */
 
 import { mkdir, realpath, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import type { SessionManager } from '@maka/runtime/session-manager';
 import { SessionConfigurationTransitionError } from '@maka/runtime/session-manager';
 import type { InteractiveExecutionStoresWriter } from '@maka/storage/execution-stores';
@@ -31,11 +31,12 @@ import {
   type SessionBundleLimits,
 } from '@maka/storage/session-bundle-contract';
 import { createProductionSessionSnapshotService } from '@maka/storage/production-session-snapshot';
-import type {
-  SessionSnapshotCancellation,
-  SessionSnapshotPrivateStagingRootAuthority,
-  SessionSnapshotStatePreparer,
-  SessionSnapshotWorkspaceConfirmationAuthority,
+import {
+  createFileSessionSnapshotStagingCleanupAuthority,
+  type SessionSnapshotCancellation,
+  type SessionSnapshotPrivateStagingRootAuthority,
+  type SessionSnapshotStatePreparer,
+  type SessionSnapshotWorkspaceConfirmationAuthority,
 } from '@maka/storage/quiescent-session-snapshot';
 import type { InteractiveShellRunWriter } from '@maka/storage/shell-run-authority';
 import type { RuntimeHostCompositionContext } from './host-kernel.js';
@@ -63,6 +64,10 @@ export interface HostCheckpointWorkspaceAuthority {
   ): Promise<T>;
 }
 export interface HostCheckpointPublicationOptions {
+  /** Dedicated durable checkpoint directory, disjoint from live state, control and workspace roots.
+   * Never derive this from disposable Host control/cache paths. Keep it stable across restarts.
+   */
+  readonly directory: string;
   readonly limits: SessionBundleLimits;
   readonly workspace: HostCheckpointWorkspaceAuthority;
   readonly privateStagingRootAuthority?: SessionSnapshotPrivateStagingRootAuthority;
@@ -92,12 +97,18 @@ export async function createHostSessionCheckpointPublication(input: {
   assertSessionBundleLimits(options.limits);
   // Freeze caller policy at composition, not midway through a publication.
   const limits = Object.freeze({ ...options.limits });
-  const root = join(context.owner.controlDirectory, 'session-checkpoints-v1');
-  const stagingParent = join(root, 'staging');
-  const cleanupStateRoot = join(root, 'cleanup');
-  const bundlesRoot = join(root, 'bundles');
   let owner: Awaited<ReturnType<typeof acquireProcessLifetimeOwner>> | undefined;
   try {
+    if (!options.directory || !isAbsolute(options.directory)) {
+      throw new Error('Checkpoint directory must be an explicit absolute durable path');
+    }
+    const root = await canonicalPlannedDirectory(options.directory);
+    for (const source of [context.owner.capability.canonicalPath, context.owner.controlDirectory]) {
+      assertDisjoint(root, await canonicalPlannedDirectory(source));
+    }
+    const stagingParent = join(root, 'staging');
+    const cleanupStateRoot = join(root, 'cleanup');
+    const bundlesRoot = join(root, 'bundles');
     await Promise.all(
       [stagingParent, cleanupStateRoot, bundlesRoot].map((path) =>
         mkdir(path, { recursive: true, mode: 0o700 }),
@@ -105,11 +116,26 @@ export async function createHostSessionCheckpointPublication(input: {
     );
     const cleanupOwner = await acquireProcessLifetimeOwner(cleanupStateRoot);
     owner = cleanupOwner;
-    const repository = await openFileSessionRepository({ storageRoot: join(root, 'repository') });
+    // Validate durable Root binding before recovering anything owned by an earlier process.
     const journal = await openSessionCheckpointPublicationStore({
       directory: join(root, 'operations'),
       rootId: context.owner.lease.rootId,
     });
+    // Recover crashed owners before exposing publication, even when this Host
+    // never captures again or only replays an already committed receipt.
+    const recovery = await createFileSessionSnapshotStagingCleanupAuthority({
+      cleanupStateRoot,
+      stagingParent,
+      processLifetimeOwner: cleanupOwner,
+      privateStagingRootAuthority: options.privateStagingRootAuthority,
+    }).recover();
+    if (recovery.failed.length > 0) {
+      throw new AggregateError(
+        recovery.failed.map(({ error }) => error),
+        'Checkpoint staging recovery failed',
+      );
+    }
+    const repository = await openFileSessionRepository({ storageRoot: join(root, 'repository') });
     const coordinator = new HostSessionCheckpointCoordinator({
       journal,
       repository,
@@ -135,6 +161,7 @@ export async function createHostSessionCheckpointPublication(input: {
         if (!header.cwd)
           throw new HostCheckpointError('unsupported', 'Session has no snapshot-capable workspace');
         const workspaceRoot = await realpath(header.cwd);
+        assertDisjoint(root, workspaceRoot);
         let statePreparer: SessionSnapshotStatePreparer | undefined;
         const service = await createProductionSessionSnapshotService({
           session: {
@@ -281,6 +308,27 @@ export async function createHostSessionCheckpointPublication(input: {
     // Optional checkpoint metadata must not prevent live-state recovery. Fail
     // this capability closed and retain the cause for the trusted caller.
     return unavailable('Checkpoint publication initialization failed', 'publication_failed', error);
+  }
+}
+
+// Resolve existing ancestors too: an apparently separate path through a symlink
+// must not place checkpoint state inside the live Root or disposable control tree.
+async function canonicalPlannedDirectory(path: string): Promise<string> {
+  try {
+    return await realpath(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || dirname(path) === path) throw error;
+    return join(await canonicalPlannedDirectory(dirname(path)), basename(path));
+  }
+}
+
+function assertDisjoint(left: string, right: string): void {
+  const contains = (parent: string, child: string) => {
+    const path = relative(parent, child);
+    return path === '' || (!isAbsolute(path) && path !== '..' && !path.startsWith(`..${sep}`));
+  };
+  if (contains(left, right) || contains(right, left)) {
+    throw new Error('Checkpoint directory must not overlap live state, control or workspace roots');
   }
 }
 function unavailable(

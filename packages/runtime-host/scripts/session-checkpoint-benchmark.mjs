@@ -153,7 +153,7 @@ async function runFixture(profile, resourceMode) {
     await resolveStorageRoot({ path: join(root, 'state'), kind: 'interactive' }),
   );
   assert.ok(owner);
-  const checkpointRoot = join(owner.controlDirectory, 'session-checkpoints-v1');
+  const checkpointRoot = join(root, 'checkpoints');
   let composition;
   let manager;
   let active;
@@ -300,6 +300,7 @@ async function runFixture(profile, resourceMode) {
         primaryBackendFactory: (context) => new BenchmarkBackend(context),
         executionPersistenceProvider: provider,
         checkpointPublication: {
+          directory: checkpointRoot,
           limits,
           workspace: {
             // Private fixture, sole writer; NOT an arbitrary-directory adapter.

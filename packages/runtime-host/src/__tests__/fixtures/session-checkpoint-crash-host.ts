@@ -23,16 +23,28 @@ import { join } from 'node:path';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
 import { createExecutionRuntimeHostComposition } from '../../server/execution-composition.js';
 
-const [stateRoot, sessionId, requestId, phase] = process.argv.slice(2);
-if (!stateRoot || !sessionId || !requestId || !['before-cas', 'after-cas'].includes(phase))
+const [stateRoot, sessionId, requestId, phase, checkpointDirectory] = process.argv.slice(2);
+if (
+  !stateRoot ||
+  !sessionId ||
+  !requestId ||
+  !checkpointDirectory ||
+  !['after-copy', 'before-cas', 'after-cas'].includes(phase)
+)
   throw new Error('Invalid checkpoint crash fixture input');
+async function pauseAtCrashPoint(): Promise<never> {
+  process.send?.({ phase });
+  return new Promise<never>(() => setInterval(() => {}, 1000));
+}
 const originalRename = fs.promises.rename.bind(fs.promises);
 fs.promises.rename = async (...args) => {
-  if (!args[1].toString().endsWith(join('repository', 'session-repository-v1.json')))
+  if (
+    phase === 'after-copy' ||
+    !args[1].toString().endsWith(join('repository', 'session-repository-v1.json'))
+  )
     return originalRename(...args);
   if (phase === 'after-cas') await originalRename(...args);
-  process.send?.({ phase });
-  await new Promise<never>(() => setInterval(() => {}, 1000));
+  await pauseAtCrashPoint();
 };
 syncBuiltinESMExports();
 const owner = await tryAcquireInteractiveRootOwner(
@@ -50,7 +62,16 @@ const composition = await createExecutionRuntimeHostComposition(
   { bootstrapRuntimePolicy: false },
   {
     checkpointPublication: {
-      workspace: { runExclusive: async (_input, operation) => operation() },
+      directory: checkpointDirectory,
+      workspace: {
+        runExclusive: async (_input, operation) => {
+          const prepared = await operation();
+          // Leave a real persisted staging lease and private copy behind, before
+          // pack/release can remove them. Only this fixture owns workspace writers.
+          if (phase === 'after-copy') await pauseAtCrashPoint();
+          return prepared;
+        },
+      },
       limits: {
         maxCompressedBytes: 8 * 1024 * 1024,
         maxDecompressedTarBytes: 16 * 1024 * 1024,

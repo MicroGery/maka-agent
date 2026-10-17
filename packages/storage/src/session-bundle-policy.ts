@@ -518,6 +518,20 @@ async function filterBackedUpDatabase(
       .all() as Array<{ name?: unknown }>;
     for (const row of tables) {
       if (typeof row.name !== 'string' || PORTABLE_GLOBAL_TABLES.has(row.name)) continue;
+      if (row.name === EVENT_WAIT_SOURCE_TABLE && !options.omitEventWaits) {
+        // A checkpoint must retain the source throttle/reservation constraining
+        // its waits, not merely their cursors. Select by Session explicitly so
+        // this is independent of SQLite's table iteration order. Unrelated
+        // sources are not part of this checkpoint's closure.
+        database
+          .prepare(`DELETE FROM ${EVENT_WAIT_SOURCE_TABLE} WHERE source_key NOT IN (
+          SELECT json_array(json_extract(record_json, '$.resource.providerId'),
+            json_extract(record_json, '$.resource.connectionId'))
+          FROM ${EVENT_WAIT_TABLE} WHERE session_id IN (${sessionIds.map(() => '?').join(', ')})
+        )`)
+          .run(...sessionIds);
+        continue;
+      }
       if (options.omitEventWaits && row.name === EVENT_WAIT_TABLE) {
         // Keep the schema while leaving root-owned wait authority behind.
         database.exec(`DELETE FROM ${quoteIdentifier(row.name)}`);
@@ -708,6 +722,7 @@ const LOCAL_SEQUENCE_COLUMNS = new Map([
 ]);
 
 const EVENT_WAIT_TABLE = 'workflow_event_waits';
+const EVENT_WAIT_SOURCE_TABLE = 'workflow_event_wait_source_cooldowns';
 
 const PORTABLE_GLOBAL_TABLES = new Set([
   'operational_schema_migrations',
@@ -1332,7 +1347,8 @@ export function listSessionBundleMergeTables(target: DatabaseSync): SessionBundl
       TRIGGER_MAINTAINED_TABLES.has(name) ||
       // Older bundles and snapshots can contain wait rows. Import is a
       // Session transfer, so it must independently refuse to copy them.
-      name === EVENT_WAIT_TABLE
+      name === EVENT_WAIT_TABLE ||
+      name === EVENT_WAIT_SOURCE_TABLE
     ) {
       continue;
     }
