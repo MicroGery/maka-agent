@@ -171,8 +171,6 @@ SQLite 与现有本地文件仍是 live commit 和普通原地重启的权威。
 
 启用需提供明确的 Bundle 配额和 `HostCheckpointWorkspaceAuthority`。后者必须能在完整私有复制期间排除该工作目录的所有写入者，包括外部进程。本改动不为任意开发目录提供虚假的一致性保证；没有离线、冻结或快照能力的 Workspace adapter 时应保持关闭。Windows 还需既有的私有暂存目录 ACL 验证能力。首版支持普通、无子 Agent 关系、非共享工作目录的 Session；活跃执行、待处理消息/Tool/审批/边界请求，以及活跃或 orphaned shell 均拒绝。
 
-macOS 部署前可在仓库根目录以普通用户运行 `node packages/runtime-host/scripts/macos-checkpoint-capability-probe.mjs`，需已安装 Xcode 命令行工具。这个可选诊断会编译原生探针、自建一次性 128 MiB APFS 镜像，检查文件系统能力和探针自身的 entitlement，并尝试创建／删除快照。不接受项目路径、不请求提权、不添加 entitlement，也不在 Host 启动或 CI 中自动运行。退出码 2 表示当前不可用，1 表示探针或清理错误，0 也仅证明创建／删除成功，不证明挂载、稳定读取、发布签名资格或生产 adapter 可用。正常结束清理测试资源；中断或清理失败时须检查操作前输出的确切临时路径。此诊断不提供普通目录的 macOS authority 实现。
-
 复制阶段依次取得 Host Session admission、Runtime mutation lane、选定 provider 的快照排他边界和可信 Workspace fence。日常存储操作在排他区间外仍可并发。Local 导出按与导入相同的顺序取得 Artifact 写锁和根级 context-value mutation gate，覆盖数据库及其载荷的私有复制，排除 Artifact 清理与 context GC。状态和工作目录全部复制后才释放 live fence；打包和发布只读取私有副本。保留过滤、Secret 确认和大小/路径配额。取消是协作式的，不会在复制仍运行时提前释放排他。
 
 可信装配层必须提供稳定的绝对路径 `checkpointPublication.directory`，作为独立的持久 checkpoint 目录。它不能与 live StateRoot、Host control directory 或 Session workspace 重叠或相互包含，符号链接别名同样检查。目录中 `repository/`、`operations/` 保存持久对象、身份与收据，`cleanup/` 保存持久暂存归属，`staging/`、`bundles/` 保存可恢复的临时载荷；整体不是可随意丢弃的缓存。不自动退回账号主目录或控制目录。这样即使 control directory 按 #5429 的提议放入 StateRoot，也不会违反 snapshot 源目录与 staging 不重叠约束；本改动不实现该 PR 的 Root 格式迁移。更换控制缓存不能丢失 checkpoint 对象与收据。
