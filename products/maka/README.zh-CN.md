@@ -46,6 +46,10 @@
 
 通过**查看调查过程**打开原调查会话。选中并引用 Bot 回复里的文字，可以把反馈关联到这轮调查。
 
+## Cloud Session 单轮激活
+
+[单轮激活协议](cli/activation.md) 在明确执行授权下接收一次输入，可在新 worker 中继续精确 checkpoint、发布后继存档并确认资源关闭。Unix CLI 参考实现使用独立的状态、Workspace、配置与 Repository 目录。
+
 ## 运行与定向测试
 
 在仓库根目录执行：

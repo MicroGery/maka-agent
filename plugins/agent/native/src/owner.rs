@@ -245,6 +245,9 @@ pub(crate) struct Owner {
     pub store: Arc<RootStore>,
     helper: std::path::PathBuf,
     pricing: Option<Arc<dyn maka_agent_engine::pricing::Pricing>>,
+    activation_budget: Option<maka_agent_facts::durable::Budget>,
+    initial_permissions: Option<WorkspacePermissions>,
+    configuration_protection: maka_sandbox::Sandbox,
     pub(super) durable: maka_agent_state::Store,
     pub(super) services: maka_host_runtime::application::NativeServices,
     wake_notify: tokio::sync::Notify,
@@ -411,7 +414,7 @@ impl Owner {
         catalog: Arc<maka_providers::catalog::Catalog>,
         durable: maka_agent_state::Store,
         helper: std::path::PathBuf,
-        pricing: Option<Arc<dyn maka_agent_engine::pricing::Pricing>>,
+        resources: crate::Resources,
     ) -> Result<Arc<Self>, initialization::InitializationError> {
         let model_reader_process =
             tokio::task::spawn_blocking(maka_process::lifetime::ProcessIdentity::current)
@@ -516,8 +519,22 @@ impl Owner {
             &settings.executors,
             settings.external.as_ref(),
         )?;
+        let configuration_protection = match &resources.configuration_root {
+            Some(root) => maka_sandbox::Sandbox::Managed {
+                filesystem: maka_sandbox::filesystem::Policy {
+                    default: maka_sandbox::filesystem::Access::Write,
+                    rules: vec![maka_sandbox::filesystem::Rule::subtree(
+                        root.canonical_path(),
+                        maka_sandbox::filesystem::Access::Deny,
+                    )],
+                    deny_globs: vec![],
+                },
+                network: maka_sandbox::Network::Allowed,
+            },
+            None => maka_sandbox::Sandbox::Disabled,
+        };
         let configuration = Arc::new(
-            ConfigurationStore::for_root(root)
+            ConfigurationStore::for_root(resources.configuration_root.unwrap_or(root))
                 .await
                 .map_err(|error| {
                     tracing::error!(stage = "configuration_store_open", cause = crate::diagnostics::config_cause(&error),
@@ -703,7 +720,10 @@ impl Owner {
         ));
         let owner = Arc::new(Self {
             helper,
-            pricing,
+            pricing: resources.pricing,
+            activation_budget: resources.budget,
+            initial_permissions: resources.initial_permissions,
+            configuration_protection,
             goals,
             auxiliary,
             quick_answer: Mutex::default(),
@@ -1016,6 +1036,13 @@ impl Owner {
         scope: &maka_capabilities::call::Scope,
         purpose: creation::Purpose,
     ) -> Result<creation::PreparedCreation, String> {
+        if self.store.checkpoint_execution().is_some()
+            && (input.preset_id.is_some()
+                || input.automatic_title
+                || !matches!(input.workspace, WorkspaceSelection::Directory { .. }))
+        {
+            return Err("agent_managed_creation_requires_explicit_directory".into());
+        }
         if let Some(reason) = metadata_rejection(&input.title, &input.labels) {
             return Ok(creation::PreparedCreation::Rejected(reason));
         }
@@ -1079,7 +1106,30 @@ impl Owner {
                 },
             ));
         }
-        let id = self.operation_id(operation);
+        let managed = self.store.checkpoint_execution();
+        let id = if let Some(execution) = managed {
+            let grant = execution.grant();
+            if grant.start.is_some()
+                || grant.handoff.is_some()
+                || input.incognito
+                || !matches!(
+                    purpose,
+                    creation::Purpose::Session {
+                        session_create_tool: false
+                    }
+                )
+                || !matches!(
+                    scope.identity,
+                    maka_capabilities::call::Identity::Remote { .. }
+                )
+            {
+                return Err("agent_managed_creation_requires_empty_ordinary_session".into());
+            }
+            execution.check().await.map_err(|error| error.to_string())?;
+            grant.binding.source.session.clone()
+        } else {
+            self.operation_id(operation)
+        };
         let admission = self.runs.session(&id).await;
         if admission.state().await.closing {
             return Ok(creation::PreparedCreation::Rejected(Rejection::Closed));
@@ -1094,14 +1144,18 @@ impl Owner {
                         .map_err(|_| "agent_settings_unavailable")?
                         .policy
                         .chat_defaults;
-                    let permissions = WorkspacePermissions {
-                        access: match defaults.sandbox_mode {
-                            SandboxMode::ReadOnly => WorkspaceAccess::ReadOnly,
-                            SandboxMode::WorkspaceWrite => WorkspaceAccess::WorkspaceWrite,
-                            SandboxMode::DangerFullAccess => WorkspaceAccess::DangerFullAccess,
-                        },
-                        request_permissions: self.settings.permissions.request_permissions,
-                    };
+                    let permissions = self
+                        .initial_permissions
+                        .clone()
+                        .filter(|_| managed.is_some())
+                        .unwrap_or(WorkspacePermissions {
+                            access: match defaults.sandbox_mode {
+                                SandboxMode::ReadOnly => WorkspaceAccess::ReadOnly,
+                                SandboxMode::WorkspaceWrite => WorkspaceAccess::WorkspaceWrite,
+                                SandboxMode::DangerFullAccess => WorkspaceAccess::DangerFullAccess,
+                            },
+                            request_permissions: self.settings.permissions.request_permissions,
+                        });
                     (input.incognito, None, permissions, None, None)
                 }
                 Some(caller) => (
@@ -1200,6 +1254,44 @@ impl Owner {
                 (session.configuration.workspace, None)
             }
         };
+        if let Some(execution) = managed {
+            let grant = execution.grant();
+            if tools.as_ref().is_none_or(|names| {
+                names.iter().any(|name| {
+                    !self.tools.contains(name)
+                        || grant
+                            .permissions
+                            .tools
+                            .as_ref()
+                            .is_some_and(|ceiling| !ceiling.contains(name))
+                })
+            }) {
+                return Err("agent_checkpoint_tools_unavailable".into());
+            }
+            let root = self
+                .store
+                .owned_root()
+                .map_err(|error| error.to_string())?
+                .canonical_path()
+                .to_owned();
+            let workspace = selected.clone();
+            let access = permissions.access;
+            let (requested, _) =
+                tokio::task::spawn_blocking(move || workspace::sandbox(&workspace, access, &root))
+                    .await
+                    .map_err(|error| error.to_string())??;
+            let requested = requested
+                .intersect(scope.sandbox_floor())
+                .map_err(|error| error.to_string())?;
+            if !grant
+                .permissions
+                .sandbox
+                .contains(&requested)
+                .map_err(|error| error.to_string())?
+            {
+                return Err("agent_checkpoint_permissions_exceed_grant".into());
+            }
+        }
         if let Some(names) = &tools
             && names.iter().any(|name| !self.tools.contains(name))
         {

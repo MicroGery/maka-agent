@@ -138,6 +138,13 @@ pub trait ExecutionAuthority: Send + Sync {
         grant: Arc<Grant>,
         request: Commit,
     ) -> BoxFuture<'_, Result<Option<CommitReceipt>, StoreError>>;
+    /// Read the original commit after the worker Root or response is lost. This
+    /// does not re-execute, check current lease liveness, or select the latest Head.
+    fn original_commit(
+        &self,
+        grant: Arc<Grant>,
+        operation: Uuid,
+    ) -> BoxFuture<'_, Result<Option<CommitReceipt>, StoreError>>;
     fn commit(
         &self,
         grant: Arc<Grant>,

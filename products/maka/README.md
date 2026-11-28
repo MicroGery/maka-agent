@@ -46,6 +46,10 @@ Choose **Read-only tools** or **Standard Session tools**, then select the tool g
 
 Use **View investigation** to open the original worker conversation. Select and quote text from a Bot reply to attach feedback to its investigation.
 
+## Cloud Session activation
+
+The [one-shot activation protocol](cli/activation.md) admits an explicit input under an execution grant, continues an exact checkpoint in a fresh worker, publishes its successor and confirms cleanup. The Unix CLI reference adapter uses independent state, Workspace, configuration and repository roots.
+
 ## Running and testing
 
 From the repository root:

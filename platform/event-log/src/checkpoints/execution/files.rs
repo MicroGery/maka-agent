@@ -323,6 +323,37 @@ impl ExecutionAuthority for FileRepository {
     ) -> BoxFuture<'_, Result<Option<CommitReceipt>, StoreError>> {
         self.run(move |db| execution_receipt(db, &grant, &request))
     }
+    fn original_commit(
+        &self,
+        grant: Arc<Grant>,
+        operation: Uuid,
+    ) -> BoxFuture<'_, Result<Option<CommitReceipt>, StoreError>> {
+        self.run(move |db| {
+            grant.binding.source.validate()?;
+            if operation.is_nil() {
+                return Err(invalid("invalid original commit operation"));
+            }
+            let key = crate::checkpoints::digest(&serde_json::to_vec(&(
+                &grant.binding.source,
+                operation,
+            ))?);
+            let original: Option<String> = db
+                .query_row(
+                    "SELECT request_json FROM checkpoint_repository_receipts WHERE operation_key=?",
+                    [key],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(original) = original else {
+                return Ok(None);
+            };
+            let request: Commit = serde_json::from_str(&original)?;
+            if request.operation != operation || request.binding != grant.binding {
+                return Err(invalid("original commit identity differs"));
+            }
+            execution_receipt(db, &grant, &request)
+        })
+    }
     fn commit(
         &self,
         grant: Arc<Grant>,

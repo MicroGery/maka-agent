@@ -44,7 +44,7 @@ pub fn provide(
     state: maka_agent_state::Store,
     helper: std::path::PathBuf,
 ) -> Result<(), String> {
-    provide_inner(registry, catalog, state, helper, None)
+    provide_inner(registry, catalog, state, helper, Resources::default())
 }
 
 /// Supply the live embedding-side rate reader, sampled at the original request boundary.
@@ -55,7 +55,36 @@ pub fn provide_with_pricing(
     helper: std::path::PathBuf,
     pricing: Arc<dyn maka_agent_engine::pricing::Pricing>,
 ) -> Result<(), String> {
-    provide_inner(registry, catalog, state, helper, Some(pricing))
+    provide_inner(
+        registry,
+        catalog,
+        state,
+        helper,
+        Resources {
+            pricing: Some(pricing),
+            ..Resources::default()
+        },
+    )
+}
+
+/// Trusted product assembly. Neither these stores nor execution budgets come from
+/// imported Session state or model arguments.
+#[derive(Clone, Default)]
+pub struct Resources {
+    pub configuration_root: Option<Arc<maka_event_log::root::RootOwner>>,
+    pub budget: Option<maka_agent_facts::durable::Budget>,
+    pub initial_permissions: Option<maka_agent_api::contract::WorkspacePermissions>,
+    pub pricing: Option<Arc<dyn maka_agent_engine::pricing::Pricing>>,
+}
+
+pub fn provide_with_resources(
+    registry: &mut NativeRegistry,
+    catalog: Arc<maka_providers::catalog::Catalog>,
+    state: maka_agent_state::Store,
+    helper: std::path::PathBuf,
+    resources: Resources,
+) -> Result<(), String> {
+    provide_inner(registry, catalog, state, helper, resources)
 }
 
 fn provide_inner(
@@ -63,7 +92,7 @@ fn provide_inner(
     catalog: Arc<maka_providers::catalog::Catalog>,
     state: maka_agent_state::Store,
     helper: std::path::PathBuf,
-    pricing: Option<Arc<dyn maka_agent_engine::pricing::Pricing>>,
+    resources: Resources,
 ) -> Result<(), String> {
     registry.insert(
         maka_agent_api::IMPLEMENTATION.into(),
@@ -71,9 +100,9 @@ fn provide_inner(
             let catalog = catalog.clone();
             let state = state.clone();
             let helper = helper.clone();
-            let pricing = pricing.clone();
+            let resources = resources.clone();
             Box::pin(async move {
-                match owner::Owner::open(context, configuration, catalog, state, helper, pricing)
+                match owner::Owner::open(context, configuration, catalog, state, helper, resources)
                     .await
                 {
                     Ok(owner) => {

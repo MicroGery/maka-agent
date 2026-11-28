@@ -399,7 +399,7 @@ async fn read_prompt(
     Ok(prompt)
 }
 
-async fn default_backend(host: &HostClient) -> Result<BackendPreference, HostError> {
+pub(crate) async fn default_backend(host: &HostClient) -> Result<BackendPreference, HostError> {
     let ModelsPage::Ready { default_model, .. } =
         query(host, "settings", "models", json!({ "kind": "start" })).await?
     else {
@@ -664,7 +664,10 @@ async fn cancel_with_reason(
     }
 }
 
-async fn write_stdout(mut text: String, stop: &CancellationToken) -> Result<(), HostError> {
+pub(crate) async fn write_stdout(
+    mut text: String,
+    stop: &CancellationToken,
+) -> Result<(), HostError> {
     if stop.is_cancelled() {
         return Err("interrupted by signal".into());
     }
@@ -1130,7 +1133,7 @@ async fn open_call(
     Ok(call)
 }
 
-async fn query<T: DeserializeOwned>(
+pub(crate) async fn query<T: DeserializeOwned>(
     host: &HostClient,
     endpoint: &str,
     method: &str,

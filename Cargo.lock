@@ -9141,6 +9141,7 @@ dependencies = [
  "log",
  "maka-acp",
  "maka-agent-api",
+ "maka-agent-authority",
  "maka-agent-facts",
  "maka-agent-native",
  "maka-agent-ports",

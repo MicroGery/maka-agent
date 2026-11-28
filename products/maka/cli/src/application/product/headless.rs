@@ -104,6 +104,7 @@ pub(crate) async fn select_committed_host(
 pub(crate) struct ProductHost {
     pub host: Arc<Host>,
     catalog: maka_product_native::catalog::RuntimeCatalog,
+    _configuration_owner: Option<Arc<RootOwner>>,
 }
 impl ProductHost {
     pub(crate) fn admitted(
@@ -111,7 +112,22 @@ impl ProductHost {
         mut catalog: maka_product_native::catalog::RuntimeCatalog,
     ) -> Self {
         catalog.start(host.wait_for_drain());
-        Self { host, catalog }
+        Self {
+            host,
+            catalog,
+            _configuration_owner: None,
+        }
+    }
+    pub(crate) async fn stop_execution(&mut self) -> Result<(), HostError> {
+        if let Err(error) = self.catalog.shutdown().await {
+            // Still drain the Host, but do not publish transferable stop evidence
+            // when a process owned by the wider product failed cleanup.
+            let host = self.host.shutdown().await;
+            host?;
+            return Err(error.into());
+        }
+        self.host.stop_execution().await?;
+        Ok(())
     }
     pub(crate) async fn shutdown(&mut self) -> Result<(), HostError> {
         let catalog = self.catalog.shutdown().await.map_err(HostError::from);
@@ -233,6 +249,61 @@ pub(crate) async fn open_host(
         }
     }
 }
+/// Open an already prepared product source under an explicit execution grant.
+/// Unlike normal interactive startup this never updates or reauthors its scope.
+pub(crate) async fn open_activation_host(
+    store: Arc<RootStore>,
+    loaded: LoadedDeployment,
+    selection: Selection,
+    configuration_owner: Arc<RootOwner>,
+    mut resources: maka_agent_native::Resources,
+) -> Result<ProductHost, HostError> {
+    #[cfg(unix)]
+    raise_open_file_limit();
+    let catalog_store =
+        maka_config::ConfigurationStore::for_root(configuration_owner.clone()).await?;
+    let mut catalog = maka_product_native::catalog::RuntimeCatalog::open(catalog_store).await?;
+    resources.configuration_root = Some(configuration_owner.clone());
+    let result = async {
+        let data = store.data_writer()?;
+        let state =
+            maka_agent_state::Store::new(data.clone(), maka_agent_state::DriverDomain::new(data)?)?;
+        let mut native = maka_host_runtime::application::NativeRegistry::default();
+        maka_product_native::provide_with_resources(
+            &mut native,
+            catalog.catalog(),
+            state,
+            std::env::current_exe()?,
+            resources,
+        )?;
+        Ok::<_, HostError>(
+            Host::open_loaded_with_options(
+                store.clone(),
+                loaded,
+                native,
+                Some(maka_host_js::factory(Default::default())),
+                selection,
+                Options::default(),
+            )
+            .await?,
+        )
+    }
+    .await;
+    match result {
+        Ok(host) => {
+            let mut product = ProductHost::admitted(host, catalog);
+            product._configuration_owner = Some(configuration_owner);
+            Ok(product)
+        }
+        Err(error) => {
+            let cleanup = catalog.shutdown().await;
+            store.drain().await;
+            cleanup?;
+            Err(error)
+        }
+    }
+}
+
 async fn prepare(
     store: &RootStore,
     roots: Roots,
@@ -267,7 +338,7 @@ async fn prepare(
 
 // Explicit update recovery must finish only its frozen target, without starting
 // another update from a potentially newer bundle.
-async fn prepare_saved(
+pub(crate) async fn prepare_saved(
     store: &RootStore,
     roots: Roots,
 ) -> Result<(LoadedDeployment, Selection), HostError> {

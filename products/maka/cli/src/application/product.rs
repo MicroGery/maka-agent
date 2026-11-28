@@ -35,8 +35,9 @@ mod launch;
 mod update;
 pub(crate) use headless::update::live_update_available;
 pub(crate) use headless::{
-    LivePublication, ProductHost, Roots, configure_workspace_locations, directories, open_host,
-    prepare_live_publication, select_committed_host,
+    LivePublication, ProductHost, Roots, configure_workspace_locations, directories,
+    open_activation_host, open_host, prepare_live_publication, prepare_saved,
+    select_committed_host,
 };
 pub(super) use update::Update;
 

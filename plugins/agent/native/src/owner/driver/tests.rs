@@ -453,7 +453,16 @@ impl Rig {
                 );
                 let completion_gate = completion_gate.clone();
                 Box::pin(async move {
-                    match Owner::open(context, configuration, catalog, state, helper, None).await {
+                    match Owner::open(
+                        context,
+                        configuration,
+                        catalog,
+                        state,
+                        helper,
+                        Default::default(),
+                    )
+                    .await
+                    {
                         Ok(mut owner) => {
                             if let Some(timeout) = model_idle_timeout {
                                 let owner = Arc::get_mut(&mut owner).unwrap();

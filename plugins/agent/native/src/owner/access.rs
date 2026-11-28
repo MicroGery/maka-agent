@@ -280,6 +280,11 @@ impl RunAccess {
             .store
             .checkpoint_execution()
             .map(|execution| execution.grant().permissions.sandbox.clone());
+        let configuration_protection = self
+            .owner()
+            .map_err(ToolError::Failed)?
+            .configuration_protection
+            .clone();
         let approved = if file_approvals {
             self.spec.filesystem_approval_ceiling.clone()
         } else {
@@ -318,6 +323,15 @@ impl RunAccess {
                     .map_err(|error| error.to_string())?;
                 approval = approval
                     .map(|sandbox| sandbox.intersect(&execution))
+                    .transpose()
+                    .map_err(|error| error.to_string())?;
+            }
+            if !matches!(base, Sandbox::Disabled) {
+                base = base
+                    .intersect(&configuration_protection)
+                    .map_err(|error| error.to_string())?;
+                approval = approval
+                    .map(|sandbox| sandbox.intersect(&configuration_protection))
                     .transpose()
                     .map_err(|error| error.to_string())?;
             }

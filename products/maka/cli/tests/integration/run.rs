@@ -41,16 +41,16 @@ use tokio::{
     net::TcpStream,
 };
 
-struct TestEnv {
+pub(super) struct TestEnv {
     _root: tempfile::TempDir,
-    home: PathBuf,
-    tmp: PathBuf,
-    workspace: PathBuf,
+    pub(super) home: PathBuf,
+    pub(super) tmp: PathBuf,
+    pub(super) workspace: PathBuf,
     roots: Vec<PathBuf>,
 }
 
 impl TestEnv {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         #[cfg(unix)]
         let root = tempfile::Builder::new()
             .prefix("mrn-")
@@ -79,11 +79,11 @@ impl TestEnv {
         }
     }
 
-    fn base_dir(&self) -> &Path {
+    pub(super) fn base_dir(&self) -> &Path {
         self.home.parent().expect("base dir")
     }
 
-    fn maka_command(&self) -> Command {
+    pub(super) fn maka_command(&self) -> Command {
         let mut cmd = Command::new(crate::maka_executable());
         cmd.current_dir(&self.workspace)
             .env("HOME", &self.home)
@@ -100,7 +100,7 @@ impl TestEnv {
         cmd
     }
 
-    fn init_root(&mut self, name: &str, base_url: &str, sandbox_mode: &str) -> PathBuf {
+    pub(super) fn init_root(&mut self, name: &str, base_url: &str, sandbox_mode: &str) -> PathBuf {
         let root = self.base_dir().join(name);
         self.roots.push(root.clone());
         let ws_host = maka_fs_tools::workspace::project::host_path(&self.workspace).unwrap();
@@ -173,7 +173,7 @@ impl Drop for TestEnv {
     }
 }
 
-async fn start_mock_ai<F>(handler: F) -> MockAiServer
+pub(super) async fn start_mock_ai<F>(handler: F) -> MockAiServer
 where
     F: Fn(&NormalizedRequest, &TurnContext) -> TurnPlan + Send + Sync + 'static,
 {

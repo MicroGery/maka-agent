@@ -1266,6 +1266,30 @@ async fn execution_admission(args: &CallArgs) -> Result<(), String> {
     {
         return Ok(());
     }
+    if args.method == "create" {
+        let execution = args
+            .owner
+            .store
+            .checkpoint_execution()
+            .expect("checked above");
+        if execution.grant().start.is_some() || execution.grant().handoff.is_some() {
+            return Err("mutation_is_outside_execution_grant".into());
+        }
+        if args
+            .owner
+            .canonical_catalog()?
+            .record(&execution.grant().binding.source.session)
+            .await
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            return Err("mutation_is_outside_execution_grant".into());
+        }
+        return args
+            .owner
+            .require_execution(&execution.grant().binding.source.session)
+            .await;
+    }
     // Only single-Session mutations belong to this grant. Global and cross-Session
     // mutations require a separate authority and fail closed in this bootstrap mode.
     if !matches!(

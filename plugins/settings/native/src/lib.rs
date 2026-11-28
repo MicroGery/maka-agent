@@ -54,6 +54,16 @@ pub fn provide(
     registry: &mut NativeRegistry,
     catalog: Arc<maka_providers::catalog::Catalog>,
 ) -> Result<(), String> {
+    provide_with_configuration_root(registry, catalog, None)
+}
+
+/// Select a separate trusted configuration Root without copying credentials into
+/// the worker State Root. The embedding retains its owner through Host shutdown.
+pub fn provide_with_configuration_root(
+    registry: &mut NativeRegistry,
+    catalog: Arc<maka_providers::catalog::Catalog>,
+    configuration_root: Option<Arc<maka_event_log::root::RootOwner>>,
+) -> Result<(), String> {
     for (implementation, export, contract) in [
         (IMPLEMENTATION, EXPORT, contract::contract()),
         ("maka.settings.setup", "Setup", contract::setup_contract()),
@@ -64,11 +74,13 @@ pub fn provide(
         ),
     ] {
         let catalog = catalog.clone();
+        let injected = configuration_root.clone();
         registry.insert(
             implementation.into(),
             Arc::new(move |context, input| {
                 let contract = contract.clone();
                 let catalog = catalog.clone();
+                let injected = injected.clone();
                 Box::pin(async move {
                     let opened = async {
                         let configuration: Configuration = serde_json::from_value(input)
@@ -81,14 +93,16 @@ pub fn provide(
                             .store()
                             .owned_root()
                             .map_err(|_| "settings_root_unavailable")?;
-                        let store = maka_config::ConfigurationStore::for_root(root)
-                            .await
-                            .map_err(|_| "settings_store_unavailable")?;
+                        let store = Arc::new(
+                            maka_config::ConfigurationStore::for_root(injected.unwrap_or(root))
+                                .await
+                                .map_err(|_| "settings_store_unavailable")?,
+                        );
                         Ok::<_, String>(Arc::new(service::Settings {
                             source: persistence.source().clone(),
                             workspace_locations: configuration.workspace_locations,
                             catalog,
-                            configuration: Arc::new(store),
+                            configuration: store,
                             log: persistence.store().clone(),
                             configured_locale: LanguagePreference::from_locale(
                                 &configuration.locale,

@@ -38,7 +38,18 @@ pub fn provide(
     state: maka_agent_state::Store,
     helper: PathBuf,
 ) -> Result<(), String> {
-    maka_agent_native::provide(registry, catalog.clone(), state, helper)?;
+    provide_with_resources(registry, catalog, state, helper, Default::default())
+}
+
+pub fn provide_with_resources(
+    registry: &mut NativeRegistry,
+    catalog: Arc<catalog::Catalog>,
+    state: maka_agent_state::Store,
+    helper: PathBuf,
+    resources: maka_agent_native::Resources,
+) -> Result<(), String> {
+    let configuration_root = resources.configuration_root.clone();
+    maka_agent_native::provide_with_resources(registry, catalog.clone(), state, helper, resources)?;
     maka_acp_native::provide(registry)?;
     maka_files_native::provide(registry)?;
     maka_computer_native::provide(registry)?;
@@ -48,6 +59,6 @@ pub fn provide(
     maka_interactions_native::forms::provide(registry)?;
     maka_web::provide(registry)?;
     maka_decisions_api_native::provide(registry)?;
-    maka_settings_native::provide(registry, catalog)?;
+    maka_settings_native::provide_with_configuration_root(registry, catalog, configuration_root)?;
     Ok(())
 }

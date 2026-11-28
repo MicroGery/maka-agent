@@ -31,6 +31,23 @@ pub async fn open_store(
     confirmed_store(maka_event_log::root_store::RootStore::open(owner, catalog).await).await
 }
 
+/// Same confirmed startup boundary with trusted checkpoint/execution capabilities.
+pub async fn open_store_with_checkpoints(
+    owner: std::sync::Arc<maka_event_log::root::RootOwner>,
+    catalog: &[maka_event_log::migration::Migration],
+    storage: maka_event_log::checkpoints::repository::Storage,
+) -> std::result::Result<maka_event_log::root_store::RootStore, maka_event_log::StoreError> {
+    confirmed_store(
+        maka_event_log::root_store::RootStore::open_with_checkpoint_storage(
+            owner,
+            catalog,
+            Some(storage),
+        )
+        .await,
+    )
+    .await
+}
+
 /// Inspect an existing Root's saved application without initializing storage.
 /// Startup cleanup retains the same original SQL/Root authority as execution.
 pub async fn open_application_inspection(

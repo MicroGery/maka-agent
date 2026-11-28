@@ -50,6 +50,8 @@ mod peer_access;
 #[cfg(unix)]
 mod remote_transport;
 
+#[cfg(unix)]
+mod activation;
 mod run;
 mod sandbox;
 mod startup;

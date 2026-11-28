@@ -53,12 +53,18 @@ impl Owner {
         floor: &maka_sandbox::Sandbox,
     ) -> Result<maka_sandbox::Sandbox, String> {
         let sandbox = self.requested_sandbox(configuration, floor).await?;
-        match self.store.checkpoint_execution() {
+        let sandbox = match self.store.checkpoint_execution() {
             Some(execution) => sandbox
                 .intersect(&execution.grant().permissions.sandbox)
-                .map_err(|error| error.to_string()),
-            None => Ok(sandbox),
+                .map_err(|error| error.to_string())?,
+            None => sandbox,
+        };
+        if matches!(sandbox, maka_sandbox::Sandbox::Disabled) {
+            return Ok(sandbox);
         }
+        sandbox
+            .intersect(&self.configuration_protection)
+            .map_err(|error| error.to_string())
     }
     #[expect(
         clippy::too_many_arguments,

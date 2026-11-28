@@ -45,6 +45,9 @@ enum Command {
     TerminalShell(crate::terminal_args::Args),
     /// Run a headless Agent prompt, or continue, wait on or answer its Session.
     Run(crate::run::Args),
+    /// Run or inspect one bounded Cloud Session activation.
+    #[command(subcommand)]
+    Activation(crate::activation::Command),
     /// Author, inspect and serve plugin applications.
     #[command(subcommand)]
     Application(crate::application::Command),
@@ -163,6 +166,7 @@ impl Cli {
                     | Command::Code(_)
                     | Command::Acp(_)
                     | Command::Run(_)
+                    | Command::Activation(_)
             )
         )
     }
@@ -238,6 +242,7 @@ impl Cli {
                 command_exit(async move { args.run().await.map_err(Into::into) })
             }
             Command::Run(args) => Box::pin(args.run()),
+            Command::Activation(args) => Box::pin(args.run()),
             Command::Application(args) => command_exit(args.run()),
             Command::Relay(args) => command_exit(args.run()),
             Command::Sandbox(args) => Box::pin(args.run(self.timeout_ms)),

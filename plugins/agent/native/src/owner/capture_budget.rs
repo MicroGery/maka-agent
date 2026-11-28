@@ -110,11 +110,11 @@ impl Owner {
         trigger: &Trigger,
         message_id: &str,
     ) -> Result<CaptureBudget, String> {
-        let mut budget = Budget {
+        let mut budget = self.activation_budget.clone().unwrap_or(Budget {
             tokens: None,
             retries: 9,
             deadline: None,
-        };
+        });
         let observed = match (&basis.background_kind, trigger) {
             (
                 BackgroundKind::Interactive,

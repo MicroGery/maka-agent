@@ -480,6 +480,13 @@ impl ExecutionAuthority for UnavailableAuthority {
     ) -> BoxFuture<'_, Result<Option<CommitReceipt>, StoreError>> {
         ExecutionAuthority::receipt(&self.inner, g, r)
     }
+    fn original_commit(
+        &self,
+        grant: Arc<Grant>,
+        operation: Uuid,
+    ) -> BoxFuture<'_, Result<Option<CommitReceipt>, StoreError>> {
+        self.inner.original_commit(grant, operation)
+    }
     fn commit(
         &self,
         g: Arc<Grant>,
@@ -933,4 +940,47 @@ async fn handoff_bootstrap_cannot_recover_a_preexisting_unrelated_session() {
     )
     .await;
     assert!(matches!(result,Err(ref e) if e.to_string().contains("lacks a committed activation")));
+}
+
+#[tokio::test]
+async fn original_commit_survives_head_movement_and_checks_generation() {
+    let f = Fixture::new().await;
+    let grant = f.grant().await;
+    let first = f.commit();
+    assert!(
+        f.repository
+            .original_commit(grant.clone(), first.operation)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let receipt =
+        ExecutionAuthority::commit(&f.repository, grant.clone(), first.clone(), f.verified())
+            .await
+            .unwrap();
+    let CommitReceipt::Published { head } = &receipt else {
+        panic!("publication failed");
+    };
+    let mut next = f.commit();
+    next.expected_revision = Some(head.revision);
+    let next_receipt = ExecutionAuthority::commit(&f.repository, grant.clone(), next, f.verified())
+        .await
+        .unwrap();
+    assert_ne!(receipt, next_receipt);
+    f.repository.revoke(grant.clone()).await.unwrap();
+    assert_eq!(
+        f.repository
+            .original_commit(grant.clone(), first.operation)
+            .await
+            .unwrap(),
+        Some(receipt)
+    );
+    let mut forged = (*grant).clone();
+    forged.generation += 1;
+    assert!(
+        f.repository
+            .original_commit(Arc::new(forged), first.operation)
+            .await
+            .is_err()
+    );
 }

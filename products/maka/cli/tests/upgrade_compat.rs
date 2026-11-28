@@ -41,6 +41,8 @@
 
 #![cfg(unix)]
 
+#[path = "support/activation_compat.rs"]
+mod activation_compat;
 #[path = "support/execution_compat.rs"]
 mod execution_compat;
 #[path = "support/host.rs"]
@@ -175,6 +177,8 @@ struct CapsuleManifest {
     script_task_id: Option<String>,
     #[serde(default)]
     execution_authority: Option<execution_compat::Capsule>,
+    #[serde(default)]
+    activation: Option<activation_compat::Capsule>,
     migrations: BTreeMap<String, Vec<i64>>,
     #[serde(default)]
     host_peer_id: Option<String>,
@@ -1633,6 +1637,7 @@ async fn produce_capsule(bin: &Path, capsule_dir: &Path) -> CapsuleManifest {
         tokio::fs::remove_file(seed).await.unwrap();
 
         let execution_authority = Some(execution_compat::produce(capsule_dir).await);
+        let activation = Some(activation_compat::produce(bin, capsule_dir, &dirs).await);
         let host_peer_id = format!("compat-peer-{nonce}");
         let settings = open_compat_settings(&dirs.root).await;
         settings
@@ -1681,6 +1686,7 @@ async fn produce_capsule(bin: &Path, capsule_dir: &Path) -> CapsuleManifest {
             operation_ref,
             script_task_id: Some(script_task_id),
             execution_authority,
+            activation,
             migrations,
             host_peer_id: Some(host_peer_id),
             host_pairing_invite: true,
@@ -1949,7 +1955,7 @@ async fn verify_capsule(bin: &Path, capsule_dir: &Path) {
                 Attachments::new(),
             )
             .await;
-            assert_eq!(ids(&beside), [side_session_id.clone()], "{beside}");
+            assert_eq!(ids(&beside), std::slice::from_ref(side_session_id), "{beside}");
             let all = call(
                 &client,
                 "agent",
@@ -2631,6 +2637,10 @@ async fn verify_capsule(bin: &Path, capsule_dir: &Path) {
             execution_compat::verify(capsule_dir, execution).await;
         }
 
+        if let Some(activation) = &manifest.activation {
+            activation_compat::verify(bin, capsule_dir, &dirs, activation).await;
+        }
+
         // Post-upgrade SQLite integrity and monotonic migration check.
         let upgraded_migrations = verify_sqlite_integrity_and_migrations(&dirs.root);
         for (db, prev_versions) in &manifest.migrations {
@@ -2687,4 +2697,15 @@ async fn upgrade_compat_capsule_roundtrip() {
     let capsule_tmp = tempfile::tempdir().unwrap();
     let _manifest = produce_capsule(&bin, capsule_tmp.path()).await;
     verify_capsule(&bin, capsule_tmp.path()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn activation_capsule_roundtrip() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let dirs = EnvDirs::in_base(&base);
+    dirs.prepare();
+    let bin = maka_binary();
+    let capsule = activation_compat::produce(&bin, &base, &dirs).await;
+    activation_compat::verify(&bin, &base, &dirs, &capsule).await;
 }

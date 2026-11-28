@@ -90,6 +90,7 @@ jiff.workspace = true
 maka-tools.workspace = true
 maka-code-runtime.workspace = true
 hex.workspace = true
+maka-agent-authority.workspace = true
 maka-agent-facts.workspace = true
 maka-agent-state.workspace = true
 maka-agent-ports.workspace = true
