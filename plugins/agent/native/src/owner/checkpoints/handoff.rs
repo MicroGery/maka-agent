@@ -68,45 +68,6 @@ impl Owner {
         scope: &Scope,
     ) -> Result<(handoff::PreparedHandoff, Arc<WorkspaceFence>, Snapshot), String> {
         self.handoff_operation(&input.session_id, operation, "prepareCheckpoint")?;
-        self.require_execution(&input.session_id).await?;
-        let checkout = self
-            .store
-            .checkout_execution_start()
-            .await
-            .map_err(diagnostic)?;
-        let state = self.checkpoint_state()?;
-        let history = state.session_history(self.run_owner(), input.session_id.clone());
-        let source = match history
-            .imported_snapshot(
-                operation.operation,
-                &checkout.manifest.history,
-                scope.cancellation.child_token(),
-            )
-            .await
-            .map_err(diagnostic)?
-        {
-            Some(source) => source,
-            None => history
-                .import_snapshot(
-                    operation.operation,
-                    checkout.manifest.history.clone(),
-                    checkout.snapshot,
-                    scope.cancellation.child_token(),
-                )
-                .await
-                .map_err(diagnostic)?,
-        };
-        let manifest = source.manifest().await.map_err(diagnostic)?;
-        let eligible = matches!(&manifest.origin, Origin::Canonical { cut }
-            if cut.session == checkout.manifest.session_id
-            && cut.owner.deployment == checkout.manifest.scope.deployment
-            && cut.owner.namespace == checkout.manifest.scope.namespace);
-        if !eligible
-            || manifest.continuation != Some(Continuation::OrdinaryNativeV1)
-            || checkout.manifest.workspace.is_none()
-        {
-            return Err("agent_checkpoint_source_not_independently_resumable".into());
-        }
         let root = self.store.owned_root().map_err(diagnostic)?;
         let parent = workspace::observed(
             self.workspace_roots.clone(),
@@ -139,14 +100,52 @@ impl Owner {
             parent: path,
             parent_identity,
         };
-        let (prepared, fence) = self
+        let mut start = self
             .store
-            .prepare_checkpoint_handoff(request, &parent)
+            .checkout_execution_start(&request)
             .await
             .map_err(diagnostic)?;
-        if prepared.head != checkout.head || prepared.manifest != checkout.manifest {
-            return Err("agent_checkpoint_start_changed".into());
+        let manifest = start.manifest().clone();
+        let state = self.checkpoint_state()?;
+        let history = state.session_history(self.run_owner(), input.session_id.clone());
+        let source = match history
+            .imported_snapshot(
+                operation.operation,
+                &manifest.history,
+                scope.cancellation.child_token(),
+            )
+            .await
+            .map_err(diagnostic)?
+        {
+            Some(source) => source,
+            None => history
+                .import_snapshot(
+                    operation.operation,
+                    manifest.history.clone(),
+                    start
+                        .take_snapshot()
+                        .ok_or("agent_checkpoint_prepared_history_unavailable")?,
+                    scope.cancellation.child_token(),
+                )
+                .await
+                .map_err(diagnostic)?,
+        };
+        let captured = source.manifest().await.map_err(diagnostic)?;
+        let eligible = matches!(&captured.origin, Origin::Canonical { cut }
+            if cut.session == manifest.session_id
+            && cut.owner.deployment == manifest.scope.deployment
+            && cut.owner.namespace == manifest.scope.namespace);
+        if !eligible
+            || captured.continuation != Some(Continuation::OrdinaryNativeV1)
+            || manifest.workspace.is_none()
+        {
+            return Err("agent_checkpoint_source_not_independently_resumable".into());
         }
+        let (prepared, fence) = self
+            .store
+            .prepare_checkpoint_handoff(request, &parent, start)
+            .await
+            .map_err(diagnostic)?;
         Ok((prepared, Arc::new(fence), source))
     }
 
@@ -248,8 +247,10 @@ impl Owner {
                 {
                     return Err("agent_checkpoint_preparation_mismatch".into());
                 }
-                if metadata_rejection(&input.title, &[]).is_some()
-                    || !matches!(input.backend, BackendPreference::Model { .. })
+                if metadata_rejection(&input.title, &[]).is_some() {
+                    return Err("agent_checkpoint_title_invalid".into());
+                }
+                if !matches!(input.backend, BackendPreference::Model { .. })
                     || !owner.backend_available(&input.backend).await?
                 {
                     return Err("agent_checkpoint_backend_unavailable".into());
@@ -261,7 +262,7 @@ impl Owner {
                     .clone();
                 let grant = execution.grant();
                 if input.tools.iter().any(|name| {
-                    !owner.tool_basis.iter().any(|tool| tool.name() == name)
+                    !owner.tools.contains(name)
                         || grant
                             .permissions
                             .tools
@@ -335,17 +336,23 @@ impl Owner {
                         candidate.stamp(),
                     )
                     .map_err(diagnostic)?;
-                let (spec, contents) = owner
-                    .history_source_spec(&input.session_id, &resolved, &source, &operation, &scope)
+                // Reject an excessive requested base policy before Run capture clips
+                // it to the execution ceiling. Approval requests still stay within
+                // that ceiling when later Runs capture their effective permissions.
+                let requested = owner
+                    .requested_sandbox(&resolved, scope.sandbox_floor())
                     .await?;
                 if !grant
                     .permissions
                     .sandbox
-                    .contains(&spec.approval_ceiling())
+                    .contains(&requested)
                     .map_err(diagnostic)?
                 {
                     return Err("agent_checkpoint_permissions_exceed_grant".into());
                 }
+                let (spec, contents) = owner
+                    .history_source_spec(&input.session_id, &resolved, &source, &operation, &scope)
+                    .await?;
                 let history = owner
                     .checkpoint_state()?
                     .session_history(owner.run_owner(), input.session_id.clone());

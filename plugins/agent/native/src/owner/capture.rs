@@ -28,7 +28,7 @@ use maka_capabilities::call::Scope;
 use maka_plugin_core::operation::RecoveryRef;
 
 impl Owner {
-    pub(super) async fn capture_sandbox(
+    pub(super) async fn requested_sandbox(
         &self,
         configuration: &ResolvedConfiguration,
         floor: &maka_sandbox::Sandbox,
@@ -45,9 +45,14 @@ impl Owner {
             tokio::task::spawn_blocking(move || workspace::sandbox(&workspace, access, &root))
                 .await
                 .map_err(|error| error.to_string())??;
-        let sandbox = sandbox
-            .intersect(floor)
-            .map_err(|error| error.to_string())?;
+        sandbox.intersect(floor).map_err(|error| error.to_string())
+    }
+    pub(super) async fn capture_sandbox(
+        &self,
+        configuration: &ResolvedConfiguration,
+        floor: &maka_sandbox::Sandbox,
+    ) -> Result<maka_sandbox::Sandbox, String> {
+        let sandbox = self.requested_sandbox(configuration, floor).await?;
         match self.store.checkpoint_execution() {
             Some(execution) => sandbox
                 .intersect(&execution.grant().permissions.sandbox)

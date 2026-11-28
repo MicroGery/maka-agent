@@ -55,11 +55,15 @@ impl Statement for Capture {
                 OR EXISTS(SELECT 1 FROM agent_room_members WHERE member_session=?2)
                 OR EXISTS(SELECT 1 FROM agent_session_values WHERE session=?2)
                 OR EXISTS(SELECT 1 FROM agent_session_loaded_tools WHERE session=?2)
+                OR EXISTS(SELECT 1 FROM agent_standalone_cell_events WHERE session=?2)
+                OR EXISTS(SELECT 1 FROM agent_cells WHERE session=?2 AND run IS NULL)
                 OR EXISTS(SELECT 1 FROM session_control WHERE json_extract(configuration,'$.parentSessionId')=?2)
                 OR EXISTS(SELECT 1 FROM agent_catalog_controls WHERE owner=?1 AND
-                  (session=?2 AND (json_extract(lineage,'$.origin') IS NOT NULL OR json_extract(lineage,'$.branch') IS NOT NULL) OR
+                  (session=?2 AND lineage IS NOT NULL OR
                    json_extract(lineage,'$.origin.parent_session_id')=?2 OR
-                   json_extract(lineage,'$.branch.parent_session_id')=?2))
+                   json_extract(lineage,'$.branch.parent_session_id')=?2 OR
+                   json_extract(lineage,'$.parent_session_id')=?2 OR
+                   json_extract(lineage,'$.root_session_id')=?2))
                 OR EXISTS(SELECT 1 FROM session_control WHERE id=?2 AND
                   (archived=1 OR json_extract(configuration,'$.parentSessionId') IS NOT NULL))",
                 params![owner, self.0.session], |r| r.get(0))?;

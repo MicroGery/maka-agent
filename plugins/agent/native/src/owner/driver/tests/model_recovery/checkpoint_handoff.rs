@@ -25,6 +25,47 @@ use maka_event_log::checkpoints::{
 };
 use maka_plugin_core::operation::RecoveryRef;
 
+struct ObservedObjects {
+    inner: Arc<dyn maka_event_log::checkpoints::repository::ImmutableObjectStore>,
+    reads: std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
+}
+impl ObservedObjects {
+    fn reads(&self, object: &maka_event_log::checkpoints::ObjectRef) -> usize {
+        self.reads
+            .lock()
+            .unwrap()
+            .get(&object.digest)
+            .copied()
+            .unwrap_or_default()
+    }
+}
+impl maka_event_log::checkpoints::repository::ImmutableObjectStore for ObservedObjects {
+    fn identity(&self) -> &str {
+        self.inner.identity()
+    }
+    fn local_directory(&self) -> Option<&std::path::Path> {
+        self.inner.local_directory()
+    }
+    fn put(
+        &self,
+        source: &mut dyn std::io::Read,
+    ) -> Result<maka_event_log::checkpoints::ObjectRef, maka_event_log::StoreError> {
+        self.inner.put(source)
+    }
+    fn read(
+        &self,
+        object: &maka_event_log::checkpoints::ObjectRef,
+    ) -> Result<std::fs::File, maka_event_log::StoreError> {
+        *self
+            .reads
+            .lock()
+            .unwrap()
+            .entry(object.digest.clone())
+            .or_default() += 1;
+        self.inner.read(object)
+    }
+}
+
 async fn detach(rig: &mut Rig) -> TestResult<()> {
     let errors = rig.finish().await;
     if !errors.is_empty() {
@@ -43,6 +84,15 @@ async fn managed(
     repository: &Arc<FileRepository>,
     execution: &Execution,
 ) -> TestResult<()> {
+    managed_with_objects(rig, boot, repository, execution, repository.objects()).await
+}
+async fn managed_with_objects(
+    rig: &mut Rig,
+    boot: &Boot,
+    repository: &Arc<FileRepository>,
+    execution: &Execution,
+    objects: Arc<dyn maka_event_log::checkpoints::repository::ImmutableObjectStore>,
+) -> TestResult<()> {
     let base = rig.directory.path().to_owned();
     let root = tokio::task::spawn_blocking(move || {
         RootOwner::open(
@@ -54,9 +104,12 @@ async fn managed(
         )
     })
     .await??;
-    let storage = repository
-        .storage(execution.grant().binding.identity.agent)?
-        .with_execution(execution.clone())?;
+    let storage = maka_event_log::checkpoints::repository::Storage::new(
+        objects,
+        repository.clone(),
+        execution.grant().binding.identity.agent,
+    )?
+    .with_execution(execution.clone())?;
     let mut migrations = maka_event_log::ROOT_MIGRATIONS.to_vec();
     migrations.extend_from_slice(maka_agent_state::MIGRATIONS);
     migrations.sort_by_key(|m| m.version);
@@ -145,6 +198,54 @@ async fn checkpoint_handoff_prepares_without_execution_and_continues_in_fresh_ro
     assert!(b_cleanup.is_empty(), "{b_cleanup:?}");
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn checkpoint_handoff_rejects_revoked_grant() {
+    let mut a = Rig::new().unwrap();
+    let mut b = Rig::new().unwrap();
+    let result = AssertUnwindSafe(tokio::time::timeout(
+        Duration::from_secs(150),
+        exercise(&mut a, &mut b, CaptureCase::Revoked),
+    ))
+    .catch_unwind()
+    .await;
+    let a_cleanup = a.finish().await;
+    let b_cleanup = b.finish().await;
+    assert!(matches!(result, Ok(Ok(Ok(())))), "{result:?}");
+    assert!(a_cleanup.is_empty(), "{a_cleanup:?}");
+    assert!(b_cleanup.is_empty(), "{b_cleanup:?}");
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn checkpoint_handoff_rejects_expired_grant() {
+    let mut a = Rig::new().unwrap();
+    let mut b = Rig::new().unwrap();
+    let result = AssertUnwindSafe(tokio::time::timeout(
+        Duration::from_secs(150),
+        exercise(&mut a, &mut b, CaptureCase::Expired),
+    ))
+    .catch_unwind()
+    .await;
+    let a_cleanup = a.finish().await;
+    let b_cleanup = b.finish().await;
+    assert!(matches!(result, Ok(Ok(Ok(())))), "{result:?}");
+    assert!(a_cleanup.is_empty(), "{a_cleanup:?}");
+    assert!(b_cleanup.is_empty(), "{b_cleanup:?}");
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn checkpoint_handoff_rejects_excess_permissions_and_accepts_allowed_builtin_tools() {
+    let mut a = Rig::new().unwrap();
+    let mut b = Rig::new().unwrap();
+    let result = AssertUnwindSafe(tokio::time::timeout(
+        Duration::from_secs(150),
+        exercise(&mut a, &mut b, CaptureCase::Restricted),
+    ))
+    .catch_unwind()
+    .await;
+    let a_cleanup = a.finish().await;
+    let b_cleanup = b.finish().await;
+    assert!(matches!(result, Ok(Ok(Ok(())))), "{result:?}");
+    assert!(a_cleanup.is_empty(), "{a_cleanup:?}");
+    assert!(b_cleanup.is_empty(), "{b_cleanup:?}");
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn checkpoint_handoff_rejects_checklist_state_missing_from_the_archive() {
     let mut a = Rig::new().unwrap();
     let mut b = Rig::new().unwrap();
@@ -165,6 +266,9 @@ enum CaptureCase {
     Complete,
     Checklist,
     HistoryOnly,
+    Restricted,
+    Revoked,
+    Expired,
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn checkpoint_handoff_rejects_omitted_workspace() {
@@ -184,6 +288,7 @@ async fn checkpoint_handoff_rejects_omitted_workspace() {
 }
 async fn exercise(a: &mut Rig, b: &mut Rig, capture: CaptureCase) -> TestResult<()> {
     let checklist = matches!(capture, CaptureCase::Checklist);
+    let restricted = matches!(capture, CaptureCase::Restricted);
     let workspace_consistency = if matches!(capture, CaptureCase::HistoryOnly) {
         Value::Null
     } else {
@@ -192,7 +297,7 @@ async fn exercise(a: &mut Rig, b: &mut Rig, capture: CaptureCase) -> TestResult<
     let mut provider = MockAiBuilder::new().interactive(1).start().await?;
     let mut observed = provider.take_interactive_rx().unwrap();
     let boot_a = bootstrap(a.directory.path(), provider.base_url(), checklist).await?;
-    let boot_b = bootstrap(b.directory.path(), provider.base_url(), false).await?;
+    let boot_b = bootstrap(b.directory.path(), provider.base_url(), true).await?;
     attach(a, &boot_a).await?;
     attach(b, &boot_b).await?;
     let backend_a = backend(a, &provider.base_url()).await?;
@@ -281,7 +386,7 @@ async fn exercise(a: &mut Rig, b: &mut Rig, capture: CaptureCase) -> TestResult<
         a.directory.path().join("root"),
         a.directory.path().join("source-unavailable"),
     )?;
-    let ClaimResult::Granted { grant, .. } = repository
+    let ClaimResult::Granted { grant, expires_at } = repository
         .claim_handoff(HandoffClaim {
             source: binding.clone(),
             target: Claim {
@@ -292,10 +397,27 @@ async fn exercise(a: &mut Rig, b: &mut Rig, capture: CaptureCase) -> TestResult<
                 },
                 start: Some(first.head.revision),
                 permissions: Permissions {
-                    sandbox: maka_sandbox::Sandbox::Disabled,
-                    tools: Some(vec![]),
+                    sandbox: if restricted {
+                        maka_sandbox::Sandbox::Managed {
+                            filesystem: maka_sandbox::filesystem::Policy::uniform(
+                                maka_sandbox::filesystem::Access::Read,
+                            ),
+                            network: maka_sandbox::Network::Allowed,
+                        }
+                    } else {
+                        maka_sandbox::Sandbox::Disabled
+                    },
+                    tools: Some(vec![
+                        "CompactContext".into(),
+                        "CreateGoal".into(),
+                        "ScheduledTask".into(),
+                    ]),
                 },
-                lease_millis: 300_000,
+                lease_millis: if matches!(capture, CaptureCase::Expired) {
+                    30_000
+                } else {
+                    300_000
+                },
             },
         })
         .await?
@@ -303,10 +425,14 @@ async fn exercise(a: &mut Rig, b: &mut Rig, capture: CaptureCase) -> TestResult<
         return Err("target grant missing".into());
     };
     let execution_b = Execution::attach(repository.clone(), Arc::new(*grant)).await?;
-    managed(b, &boot_b, &repository, &execution_b).await?;
+    let tracked = Arc::new(ObservedObjects {
+        inner: repository.objects(),
+        reads: Default::default(),
+    });
+    managed_with_objects(b, &boot_b, &repository, &execution_b, tracked.clone()).await?;
     let prepare_input =
         json!({"sessionId":session_b,"parent":b.directory.path().join("workspace")});
-    if !matches!(capture, CaptureCase::Complete) {
+    if matches!(capture, CaptureCase::Checklist | CaptureCase::HistoryOnly) {
         let error = call(
             b.client.as_ref().unwrap(),
             "agent",
@@ -334,6 +460,12 @@ async fn exercise(a: &mut Rig, b: &mut Rig, capture: CaptureCase) -> TestResult<
         return Ok(());
     }
     let (preparation, prepared) = recorded(b, "prepareCheckpoint", prepare_input.clone()).await?;
+    assert_eq!(
+        tracked.reads(&first.head.manifest),
+        1,
+        "preparation must validate the object closure only once"
+    );
+    let original_reads = tracked.reads.lock().unwrap().clone();
     let restored = PathBuf::from(prepared["path"].as_str().ok_or("prepared path missing")?);
     assert_eq!(
         std::fs::read_to_string(restored.join("answer.txt"))?,
@@ -360,8 +492,104 @@ async fn exercise(a: &mut Rig, b: &mut Rig, capture: CaptureCase) -> TestResult<
     assert!(observed.try_recv().is_err());
     // Restart after files are ready but before any Session/admission is installed.
     detach(b).await?;
-    managed(b, &boot_b, &repository, &execution_b).await?;
-    let activation = json!({"sessionId":session_b,"preparation":preparation,"preparedInput":prepare_input,"title":"Continued","permissions":{"access":"read_only","requestPermissions":false},"backend":backend_b,"tools":[],"acceptExternalWritersRisk":true});
+    managed_with_objects(b, &boot_b, &repository, &execution_b, tracked.clone()).await?;
+    let mut activation = json!({"sessionId":session_b,"preparation":preparation,"preparedInput":prepare_input,"title":"Continued","permissions":{"access":"read_only","requestPermissions":false},"backend":backend_b,"tools":[],"acceptExternalWritersRisk":true});
+    if matches!(capture, CaptureCase::Revoked | CaptureCase::Expired) {
+        if matches!(capture, CaptureCase::Revoked) {
+            repository
+                .revoke(Arc::new(execution_b.grant().clone()))
+                .await?;
+        } else {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis() as u64;
+            tokio::time::sleep(Duration::from_millis(expires_at.saturating_sub(now) + 1)).await;
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while execution_b.check().await.is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        for (method, input) in [
+            ("prepareCheckpoint", prepare_input),
+            ("activateCheckpoint", activation),
+        ] {
+            assert!(
+                call(b.client.as_ref().unwrap(), "agent", method, input)
+                    .await
+                    .is_err(),
+                "{method} accepted an invalid grant"
+            );
+        }
+        assert_eq!(
+            repository.read_head(binding.identity.clone()).await?,
+            Some(first)
+        );
+        assert!(observed.try_recv().is_err());
+        provider.shutdown().await;
+        return Ok(());
+    }
+    if restricted {
+        for access in ["workspace_write", "danger_full_access"] {
+            let mut excessive = activation.clone();
+            excessive["permissions"]["access"] = json!(access);
+            let error = call(
+                b.client.as_ref().unwrap(),
+                "agent",
+                "activateCheckpoint",
+                excessive,
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("agent_checkpoint_permissions_exceed_grant"),
+                "{error}"
+            );
+            assert!(
+                b.store
+                    .as_ref()
+                    .unwrap()
+                    .get_session::<Value>(&session_b)
+                    .await?
+                    .is_none()
+            );
+        }
+    }
+    for name in ["NotInstalled", "todo_read", "CreateGoal", "ScheduledTask"] {
+        let mut invalid = activation.clone();
+        invalid["tools"] = json!([name]);
+        let error = call(
+            b.client.as_ref().unwrap(),
+            "agent",
+            "activateCheckpoint",
+            invalid,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("agent_checkpoint_tools_unavailable"),
+            "{name}: {error}"
+        );
+    }
+    let mut invalid_title = activation.clone();
+    invalid_title["title"] = json!("\n");
+    let error = call(
+        b.client.as_ref().unwrap(),
+        "agent",
+        "activateCheckpoint",
+        invalid_title,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("agent_checkpoint_title_invalid"),
+        "{error}"
+    );
     let mut fabricated = activation.clone();
     fabricated["preparation"]["operation"] = json!(Uuid::new_v4());
     assert!(
@@ -413,13 +641,40 @@ async fn exercise(a: &mut Rig, b: &mut Rig, capture: CaptureCase) -> TestResult<
             .is_none()
     );
     std::fs::write(restored.join("answer.txt"), "checkpoint r1")?;
+    activation["tools"] = json!(["CompactContext"]);
     let (activation_ref, activated) = recorded(b, "activateCheckpoint", activation.clone()).await?;
     assert_eq!(
         activated["logicalSessionId"],
         json!(binding.identity.session)
     );
     assert_eq!(activated["session"]["id"], session_b);
+    assert_eq!(
+        tracked.reads(&first.head.manifest),
+        1,
+        "activation must reuse durable verified preparation rather than rescan the object closure"
+    );
+    for (digest, count) in &original_reads {
+        if prepared["workspace"]["inventory"]["digest"].as_str() != Some(digest.as_str()) {
+            assert_eq!(
+                tracked.reads.lock().unwrap().get(digest),
+                Some(count),
+                "activation reread immutable payload {digest}"
+            );
+        }
+    }
+    assert_eq!(activated["session"]["permissions"]["access"], "read_only");
     assert!(observed.try_recv().is_err(), "activation started a model");
+    assert!(
+        call(
+            b.client.as_ref().unwrap(),
+            "agent",
+            "activateCheckpoint",
+            activation.clone()
+        )
+        .await
+        .is_err(),
+        "a new operation cannot activate twice"
+    );
     let sent = call(b.client.as_ref().unwrap(),"agent","send",json!({"sessionId":session_b,"message":"Continue from what you remember.","backend":backend_b})).await?;
     let request = observed.recv().await.ok_or("target continuation missing")?;
     assert!(serde_json::to_string(&request.request)?.contains("original-context-token"));
@@ -463,7 +718,7 @@ async fn exercise(a: &mut Rig, b: &mut Rig, capture: CaptureCase) -> TestResult<
         );
     }
     detach(b).await?;
-    managed(b, &boot_b, &repository, &execution_b).await?;
+    managed_with_objects(b, &boot_b, &repository, &execution_b, tracked.clone()).await?;
     assert!(
         observed.try_recv().is_err(),
         "restarting an activated Host started a model"
@@ -480,6 +735,20 @@ async fn exercise(a: &mut Rig, b: &mut Rig, capture: CaptureCase) -> TestResult<
     assert!(
         matches!(receipt.outcome,OperationOutcome::Returned { result: OperationResult::Success { ref value } } if value == &activated)
     );
+    let owner = b.captured.lock().unwrap().clone().unwrap();
+    let scope = maka_capabilities::call::Issuer::default().issue(
+        maka_capabilities::call::Identity::Remote {
+            request_id: Uuid::new_v4(),
+        },
+        CancellationToken::new(),
+    )?;
+    let replay = owner
+        .activate_checkpoint(serde_json::from_value(activation)?, &activation_ref, &scope)
+        .await?;
+    let crate::owner::send::NativeMutation::Returned(replayed) = replay else {
+        return Err("original activation was recomputed".into());
+    };
+    assert_eq!(serde_json::to_value(replayed)?, activated);
     provider.shutdown().await;
     Ok(())
 }

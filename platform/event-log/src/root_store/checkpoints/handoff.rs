@@ -48,10 +48,31 @@ struct Identity {
     request: Prepare,
 }
 
+/// Verified material (or its durable completed preparation) bound to this exact
+/// Root, grant and request. Callers cannot manufacture it from archive metadata.
+pub struct HandoffStart {
+    log: Arc<EventLog>,
+    identity: Identity,
+    head: Head,
+    manifest: Manifest,
+    snapshot: Option<std::fs::File>,
+}
+impl HandoffStart {
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+    pub fn take_snapshot(&mut self) -> Option<std::fs::File> {
+        self.snapshot.take()
+    }
+}
+
 impl RootStore {
     /// A grant binds the target to its own actual Root. The retained checkpoint
     /// continues to name its original publisher until a new checkpoint commits.
-    pub async fn checkout_execution_start(&self) -> Result<Checkout, StoreError> {
+    pub async fn checkout_execution_start(
+        &self,
+        request: &Prepare,
+    ) -> Result<HandoffStart, StoreError> {
         self.require_open()?;
         let storage = self
             .log
@@ -72,19 +93,55 @@ impl RootStore {
         let revision = grant
             .start
             .ok_or_else(|| invalid("execution has no checkpoint start"))?;
-        let checkout = storage
-            .checkout_exact(grant.binding.identity.clone(), revision)
-            .await?;
-        if checkout.manifest.root_id != source.source.root_id
-            || checkout.manifest.scope != source.source.scope
-            || checkout.manifest.session_id != source.source.session
+        let identity = Identity {
+            grant: grant.clone(),
+            request: request.clone(),
+        };
+        let key = request.operation.to_string();
+        let prior = self.log.connection.read(move |db| {
+            Ok(db.query_row("SELECT request_json,prepared_json,directory_identity_json FROM checkpoint_handoffs WHERE operation=?",
+                [&key], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?))).optional()?)
+        }).await?;
+        let (head, manifest, snapshot) = if let Some((original, prepared, directory)) = prior {
+            if serde_json::from_str::<Identity>(&original)? != identity || directory.is_none() {
+                return Err(invalid(
+                    "handoff preparation incomplete or identity conflict",
+                ));
+            }
+            let prepared: PreparedHandoff = serde_json::from_str(&prepared)?;
+            let retained = storage
+                .sessions
+                .read_head(grant.binding.identity.clone())
+                .await?
+                .ok_or_else(|| invalid("checkpoint revision unavailable"))?;
+            if retained.binding != *source
+                || retained.head != prepared.head
+                || retained.head.revision != revision
+            {
+                return Err(invalid("checkpoint revision unavailable"));
+            }
+            (prepared.head, prepared.manifest, None)
+        } else {
+            let checkout = storage
+                .checkout_exact(grant.binding.identity.clone(), revision)
+                .await?;
+            (checkout.head, checkout.manifest, Some(checkout.snapshot))
+        };
+        if manifest.root_id != source.source.root_id
+            || manifest.scope != source.source.scope
+            || manifest.session_id != source.source.session
             || source.identity != grant.binding.identity
             || source.source.root_id == grant.binding.source.root_id
         {
             return Err(invalid("checkpoint differs from handoff source"));
         }
-        execution.check().await?;
-        Ok(checkout)
+        Ok(HandoffStart {
+            log: self.log.clone(),
+            identity,
+            head,
+            manifest,
+            snapshot,
+        })
     }
 
     /// Repeated preparation verifies and reuses the original directory; it never
@@ -94,6 +151,7 @@ impl RootStore {
         &self,
         request: Prepare,
         parent: &RootWorkspace,
+        start: HandoffStart,
     ) -> Result<(PreparedHandoff, WorkspaceFence), StoreError> {
         let owner = self.owned_root()?;
         parent.validate(&owner)?;
@@ -103,18 +161,22 @@ impl RootStore {
         {
             return Err(invalid("invalid checkpoint handoff request"));
         }
-        let checkout = self.checkout_execution_start().await?;
-        let grant = self
+        let execution = self
             .checkpoint_execution()
             .ok_or_else(|| invalid("execution grant required"))?
-            .grant()
             .clone();
-        let identity = Identity { grant, request };
+        if !Arc::ptr_eq(&start.log, &self.log)
+            || start.identity.request != request
+            || start.identity.grant != *execution.grant()
+        {
+            return Err(invalid("handoff checkout authority mismatch"));
+        }
+        let identity = start.identity;
         let parent = parent.clone();
         let physical = Arc::new(std::sync::OnceLock::<WorkspaceFence>::new());
         let log = self.log.scoped(physical.clone());
         let gates = self.gates.clone();
-        worker(log, gates.clone(), move |log, objects| async move {
+        let result = worker(log, gates.clone(), move |log, objects| async move {
             let request = &identity.request;
             let directory = parent.directory();
             if !request.parent_identity.matches(directory)? {
@@ -139,8 +201,8 @@ impl RootStore {
             let slot = super::super::workspace_fence::ChildSlot::reserve(&gates, &objects.owner, directory.try_clone()?, name.clone())?;
             physical.set(slot.fence()).map_err(|_|invalid("handoff fence already captured"))?;
             let prepared = PreparedHandoff {
-                head: checkout.head,
-                manifest: checkout.manifest,
+                head: start.head,
+                manifest: start.manifest,
                 path: parent_path.join(&name),
             };
             if let Some((original, data, inode)) = prior {
@@ -175,7 +237,25 @@ impl RootStore {
                 Ok(())
             }).await?;
             Ok((prepared, fence))
-        }).await
+        }).await?;
+        let storage = self
+            .log
+            .checkpoint
+            .as_ref()
+            .and_then(|a| a.storage())
+            .ok_or_else(|| invalid("shared checkpoint authority required"))?;
+        let retained = storage
+            .sessions
+            .read_head(execution.grant().binding.identity.clone())
+            .await?
+            .ok_or_else(|| invalid("checkpoint revision unavailable"))?;
+        if retained.head != result.0.head
+            || Some(&retained.binding) != execution.grant().handoff.as_ref()
+        {
+            return Err(invalid("checkpoint revision unavailable"));
+        }
+        execution.check().await?;
+        Ok(result)
     }
 }
 fn verify_workspace(

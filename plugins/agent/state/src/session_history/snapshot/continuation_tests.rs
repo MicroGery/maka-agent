@@ -118,3 +118,145 @@ async fn checkpoint_continuation_uses_source_relationships_and_keeps_old_capture
     drop((source, state, data, history, captured, ordinary, dependent));
     root.close().await.unwrap();
 }
+
+#[derive(Clone, Copy)]
+enum Dependency {
+    RevisionSelf,
+    RevisionChild,
+    RevisionDescendant,
+    StandaloneCell,
+    StandaloneEvent,
+}
+struct SeedDependency {
+    owner: String,
+    case: Dependency,
+}
+impl maka_event_log::writeback::Statement for SeedDependency {
+    type Value = ();
+    type Output = ();
+    fn execute(
+        self,
+        c: &rusqlite::Connection,
+    ) -> Result<maka_event_log::writeback::Prepared<()>, StoreError> {
+        use maka_agent_facts::session::Lineage;
+        use rusqlite::params;
+        match self.case {
+            Dependency::RevisionSelf
+            | Dependency::RevisionChild
+            | Dependency::RevisionDescendant => {
+                let (session, parent, root) = match self.case {
+                    Dependency::RevisionSelf => ("source", "parent", "ancestor"),
+                    Dependency::RevisionChild => ("child", "source", "ancestor"),
+                    _ => ("descendant", "child", "source"),
+                };
+                let lineage = Lineage::Revision {
+                    root_session_id: root.into(),
+                    parent_session_id: parent.into(),
+                    turn_id: "turn".into(),
+                    index: 1,
+                    branch: None,
+                };
+                c.execute("INSERT INTO agent_catalog_controls(owner,session,revision,lineage) VALUES(?,?,0,?)",params![self.owner,session,serde_json::to_string(&lineage)?])?;
+            }
+            Dependency::StandaloneCell => {
+                c.execute("INSERT INTO agent_cells(cell,session,run,pending,body) VALUES('completed-cell','source',NULL,0,'{}')",[])?;
+            }
+            Dependency::StandaloneEvent => {
+                let content =
+                    ContentBlob::json(&json!({"completed":"standalone cell"}))?.store(c)?;
+                c.execute("INSERT INTO agent_standalone_cell_events(id,cell,session,at,agent_cursor,body_content_id) VALUES('event','completed-cell','source',1,0,?)",[content])?;
+            }
+        }
+        Ok(maka_event_log::writeback::Prepared {
+            value: (),
+            changed: true,
+            notification: maka_event_log::writeback::Notification::NONE,
+        })
+    }
+    fn committed(_: ()) {}
+    fn isolated_rejection(_: &StoreError) -> bool {
+        false
+    }
+}
+async fn excludes_dependency(case: Dependency) {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().to_owned();
+    let owner = tokio::task::spawn_blocking(move || {
+        RootOwner::create(
+            &base.join("root"),
+            &RootNamespaces {
+                ownership: base.join("owners"),
+                control: base.join("control"),
+            },
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let mut migrations = maka_event_log::ROOT_MIGRATIONS.to_vec();
+    migrations.extend_from_slice(crate::MIGRATIONS);
+    migrations.sort_by_key(|m| m.version);
+    let root = RootStore::open(Arc::new(owner), &migrations).await.unwrap();
+    let data = root.data_writer().unwrap();
+    let state = crate::Store::new(
+        data.clone(),
+        crate::DriverDomain::new(data.clone()).unwrap(),
+    )
+    .unwrap();
+    let source = root
+        .create_session("source", "source", &json!({}), 1)
+        .await
+        .unwrap();
+    let record = source.get::<serde_json::Value>().await.unwrap().unwrap();
+    let owner = RunOwner {
+        deployment: Uuid::new_v4(),
+        namespace: maka_plugin_core::composition::InstanceId(vec![Uuid::new_v4()]),
+    };
+    let history = state.session_history(owner.clone(), "source".into());
+
+    data.write(SeedDependency {
+        owner: serde_json::to_string(&owner).unwrap(),
+        case,
+    })
+    .await
+    .unwrap();
+    let captured = history
+        .capture_checkpoint_snapshot(
+            CaptureRequest {
+                id: SnapshotId::new(),
+                cut: history.capture().await.unwrap(),
+            },
+            source.revision_guard(&data, record.revision).unwrap(),
+            Some(state.quiescence_guard(owner, "source".into()).unwrap()),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        captured.manifest().await.unwrap().continuation,
+        None,
+        "a completed dependency outside the archive must prevent continuation"
+    );
+    drop((source, state, data, history, captured));
+    root.close().await.unwrap();
+}
+#[tokio::test]
+async fn checkpoint_continuation_rejects_revision_without_branch() {
+    excludes_dependency(Dependency::RevisionSelf).await;
+}
+#[tokio::test]
+async fn checkpoint_continuation_rejects_revision_child_without_branch() {
+    excludes_dependency(Dependency::RevisionChild).await;
+}
+#[tokio::test]
+async fn checkpoint_continuation_rejects_revision_descendant_without_branch() {
+    excludes_dependency(Dependency::RevisionDescendant).await;
+}
+#[tokio::test]
+async fn checkpoint_continuation_rejects_completed_standalone_cell() {
+    excludes_dependency(Dependency::StandaloneCell).await;
+}
+#[tokio::test]
+async fn checkpoint_continuation_rejects_standalone_cell_history() {
+    excludes_dependency(Dependency::StandaloneEvent).await;
+}
