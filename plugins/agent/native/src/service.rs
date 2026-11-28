@@ -174,6 +174,21 @@ impl Handler for Agent {
                     .await?
                     .complete(&context)
             }),
+            "prepareCheckpoint" => json_rpc(&mut args, |owner, input, context| async move {
+                let operation = context.operation().ok_or("agent_mutation_required")?;
+                encode(
+                    owner
+                        .prepare_checkpoint(decode(input)?, operation, context.scope())
+                        .await?,
+                )
+            }),
+            "activateCheckpoint" => handler_rpc(&mut args, |owner, input, context| async move {
+                let operation = context.operation().ok_or("agent_mutation_required")?;
+                owner
+                    .activate_checkpoint(decode(input)?, operation, context.scope())
+                    .await?
+                    .complete(&context)
+            }),
             "restoreSessionCheckpoint" => {
                 handler_rpc(&mut args, |owner, input, context| async move {
                     let operation = context.operation().ok_or("agent_mutation_required")?;
@@ -1271,6 +1286,8 @@ async fn execution_admission(args: &CallArgs) -> Result<(), String> {
             | "stopComputerApp"
             | "respond"
             | "publishCheckpoint"
+            | "prepareCheckpoint"
+            | "activateCheckpoint"
     ) {
         return Err("mutation_is_outside_execution_grant".into());
     }

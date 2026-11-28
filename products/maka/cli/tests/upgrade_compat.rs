@@ -688,6 +688,29 @@ fn verify_sqlite_integrity_and_migrations(root: &Path) -> BTreeMap<String, Vec<i
                     |row| row.get(0),
                 )
                 .unwrap();
+            if has_runs > 0 && versions.contains(&68) {
+                // v68 installs an empty preparation journal on old Roots, without
+                // treating any existing Session or inspection archive as activated.
+                let mut handoffs = conn
+                    .prepare(
+                        "SELECT prepared_json,directory_identity_json FROM checkpoint_handoffs",
+                    )
+                    .unwrap();
+                let rows = handoffs
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                    })
+                    .unwrap();
+                for row in rows {
+                    let (prepared, identity) = row.unwrap();
+                    let _: maka_event_log::root_store::handoff::PreparedHandoff =
+                        serde_json::from_str(&prepared).unwrap();
+                    if let Some(identity) = identity {
+                        let _: maka_sandbox::workspace::DirectoryIdentity =
+                            serde_json::from_str(&identity).unwrap();
+                    }
+                }
+            }
             let has_encoding = maka_event_log::content::has_encoding_column(&conn).unwrap();
             if has_runs > 0 && versions.contains(&17) {
                 use maka_agent_facts::external_publication::PublicationManifest;

@@ -45,7 +45,7 @@
 
 `checkpoints::execution::ExecutionAuthority` 是独立于不可变对象库的可信控制面接口。grant 绑定逻辑 Session、稳定 activation ID、执行代次、精确起始 Head 以及沙箱和工具权限上限。`claim`、`renew` 对同一请求返回原始持久结果，拒绝结果也不改变；旧的成功回执不代表当前仍可执行，应通过 `observe` 查询现状。
 
-可信装配层领取 grant、调用 `Execution::attach`，再通过 `Storage::with_execution` 将其传给 `RootStore::open_with_checkpoint_storage`，最后启动 Host。首版绑定原 Root/deployment/namespace 中的一个 native Session，不负责在新 Root 中加载或继续该身份。Root 持久记录执行配置，不能绕过授权按默认本地模式重开。没有本地 checkpoint 身份绑定或发布记录的 Root，或没有未完成发布的既有共享仓库，可以显式启用；更换已登记的 grant 需要后续激活/迁移流程。
+可信装配层领取 grant、调用 `Execution::attach`，再通过 `Storage::with_execution` 将其传给 `RootStore::open_with_checkpoint_storage`，最后启动 Host。普通 claim 绑定原 Root/deployment/namespace 中的一个 native Session；计划内跨 Root 续作通过下述 `claim_handoff` 完成。Root 持久记录执行配置，不能绕过授权按默认本地模式重开。没有本地 checkpoint 身份绑定或发布记录的 Root，或没有未完成发布的既有共享仓库，可以显式启用；更换已登记的 grant 需要后续激活/迁移流程。
 
 受管模式下，修改类 RPC 的统一入口拒绝其他 Session 的写入及 Root 全局、跨 Session 操作（包括创建/分支、Goal、调度和执行器安装）。Root 全局任务生产者保持关闭；恢复时先过滤其他 Session，再检查已保存权限，然后才预留 Run 或消费排队输入。授权拒绝保留原 Run 事实和队列。Native Owner 在消息/Run 准入及实际模型、工具授权时检查 grant，不在每次配置读取时重复查询。工具选择和沙箱权限（包括单独批准的文件/网络权限）均与 grant 上限取交集；若旧 Run 保存的权限或可批准权限超过该上限，则拒绝恢复。首版拒绝外部执行器后端。Host 每 250 ms 观察一次，每次观察最多等待五秒。撤销、过期或观察失败会不可逆地取消本地工作并启动 Host 关闭。这是对已接收工作的协作式取消，不是瞬时撤销外部副作用。authority 适配器负责调用方认证和可线性化的仲裁，序列化的 grant 字段本身不是访问凭据。
 
@@ -53,7 +53,16 @@
 
 计划内交接由监督方调用 `Host::stop_execution`。Host 关闭传输、取消并排空插件及受管进程，等待 Root/SQL 清理确认后才登记 `Stopped`；重复关闭会保留原清理失败。撤销和最后向控制面登记清理结果的请求各有五秒期限。只有这个确认才允许下一代执行方领取资格；超时、租约过期、失联或清理失败都会阻止接管。外部 `Environment` 适配器必须覆盖原运行环境及所有受管写者，不能只结束父 PID。未受管编辑器或远端第三方副作用仍需自己的隔离/结算机制，本接口不会把未验证的 Workspace 快照变成一致快照。
 
-默认本地 Host 不启用此可选模式。这些 Rust 接口不绑定云厂商或 Kubernetes，也不新增 CLI 配置、跨 Root 激活或自动 checkpoint 触发。
+默认本地 Host 不启用此可选模式。这些 Rust 接口不绑定云厂商或 Kubernetes，也不新增 CLI 配置或自动 checkpoint 触发。
+
+## 计划内跨 Root 续作
+
+1. 受管源端在静止边界发布包含 Workspace 的精确 checkpoint。Native 在持有源端准入时记录续作资格，不将 Goal、Bot、定时任务、待办或持久 Cell 状态、Room、父子关系、未完成工作或外部执行器历史静默丢弃。仅包含历史的存档、旧存档和仅供查看的快照仍可读取，导入不会为其补造续作资格。
+2. 监督方停止并排空源端，再以当前 Head 的原发布方绑定及新 Root/deployment/namespace/Session 调用 `ExecutionAuthority::claim_handoff`。逻辑 Session 和 agent 不变。协调器要求精确 Head 仍被保留、此前所有执行代次均已停止，并原子登记目标绑定和 grant；直到目标发布后继版本，Head 仍保留原发布方来源。
+3. 可信装配层携 grant 启动目标 Host。`prepareCheckpoint` 导入经过校验的规范历史，并在独立子目录中恢复文件，但不创建可运行 Session、不调用模型、不接收待执行消息。准备记录保存原目录身份和精确 checkpoint。目标重启后会验证并复用原准备；目录替换、文件修改、不完整复制、Session ID 已占用均拒绝覆盖。
+4. `activateCheckpoint` 要求已提交的准备操作引用，以及符合 grant 上限的目标模型、工具和权限。目标配置、惰性的历史引用、启动激活标记和原始 Host 操作结果在同一事务中提交；交接 grant 无法启动缺少此标记的已有目标 Session，因此启动恢复不能运行原有的不相关工作，不重放旧工具，也不自动发消息。后续显式 `send` 使用原历史；`publishCheckpoint` 以目标代次推进同一个逻辑 Head。
+
+Workspace 一致性仍是调用方确认或未验证；激活需要明确接受外部写入风险。准备隔离和哈希校验都不能阻止其他应用写入。凭据、依赖安装、全局 Memory、Goal 和跨 Session 协调状态不随之迁移。这条路径继续选定 checkpoint，而不包含其发布后的修改；监督方负责协调计划内交接并提供目标环境。它不实现云调度器、自动故障接管、UI、任意历史回退或覆盖已有目标 Session。
 
 ## 测试
 

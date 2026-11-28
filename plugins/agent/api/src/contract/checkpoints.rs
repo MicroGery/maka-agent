@@ -385,3 +385,49 @@ pub struct SessionCheckpointRestoreReceipt {
     pub operation: Option<OperationObservation>,
     pub restore: Option<SessionCheckpointRestored>,
 }
+
+/// Prepare exactly the checkpoint selected by the target Host's execution grant.
+/// No live Session or execution is created by this operation.
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename = "AgentCheckpointPrepare")]
+pub struct CheckpointPrepare {
+    pub session_id: String,
+    pub parent: String,
+}
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename = "AgentCheckpointPrepared")]
+pub struct CheckpointPrepared {
+    pub operation: Uuid,
+    pub session_id: String,
+    pub logical_session_id: Uuid,
+    pub head: HistoryCheckpointHead,
+    pub path: String,
+    #[schemars(
+        with = "maka_plugin_core::wire_schema::RequiredNullable<CheckpointWorkspaceSnapshot>"
+    )]
+    pub workspace: Option<CheckpointWorkspaceSnapshot>,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename = "AgentCheckpointActivate")]
+pub struct CheckpointActivate {
+    pub session_id: String,
+    pub preparation: RecoveryRef,
+    pub prepared_input: CheckpointPrepare,
+    pub title: String,
+    pub permissions: super::WorkspacePermissions,
+    pub backend: super::BackendPreference,
+    /// Explicit target capabilities; source tool bindings and credentials are never adopted.
+    pub tools: Vec<String>,
+    pub accept_external_writers_risk: bool,
+}
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename = "AgentCheckpointActivated")]
+pub struct CheckpointActivated {
+    pub session: Box<super::Session>,
+    pub logical_session_id: Uuid,
+    pub activation: Uuid,
+}

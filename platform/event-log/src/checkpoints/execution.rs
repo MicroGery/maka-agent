@@ -48,6 +48,16 @@ pub struct Claim {
     pub lease_millis: u64,
 }
 
+/// A planned transfer from the exact retained checkpoint to a fresh execution
+/// environment. Only trusted assembly can invoke the authority, not archive data.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandoffClaim {
+    pub source: Binding,
+    /// The same logical identity, bound to the destination Root/native Session.
+    pub target: Claim,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Grant {
@@ -56,6 +66,10 @@ pub struct Grant {
     pub binding: Binding,
     pub start: Option<Revision>,
     pub permissions: Permissions,
+    /// An ordinary grant may resume its existing local Session. A handoff grant
+    /// may only resume a target installed by the atomic activation transaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<Binding>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +125,10 @@ impl Stopped {
 pub trait ExecutionAuthority: Send + Sync {
     fn repository_identity(&self) -> &str;
     fn claim(&self, request: Claim) -> BoxFuture<'_, Result<ClaimResult, StoreError>>;
+    fn claim_handoff(
+        &self,
+        request: HandoffClaim,
+    ) -> BoxFuture<'_, Result<ClaimResult, StoreError>>;
     fn observe(&self, grant: Arc<Grant>) -> BoxFuture<'_, Result<Status, StoreError>>;
     fn renew(&self, request: Renewal) -> BoxFuture<'_, Result<Status, StoreError>>;
     fn revoke(&self, grant: Arc<Grant>) -> BoxFuture<'_, Result<Status, StoreError>>;

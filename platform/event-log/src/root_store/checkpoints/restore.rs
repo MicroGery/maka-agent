@@ -572,10 +572,7 @@ fn verify_destination(
     identity: &DirectoryIdentity,
     fence: &WorkspaceFence,
 ) -> Result<(), StoreError> {
-    use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
-    use cap_std::fs::{Dir, OpenOptions};
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
+    use cap_fs_ext::DirExt;
     fence.validate_owner(&objects.owner)?;
     let (parent, name) = fence.child_parent()?;
     if !operation.parent_identity.matches(parent)? {
@@ -595,7 +592,19 @@ fn verify_destination(
     if !identity.matches(root)? {
         return Err(invalid("restore destination directory changed"));
     }
-    let entries = workspace::inventory(objects, &prepared.workspace)?;
+    verify_workspace(objects, &prepared.workspace, root)
+}
+
+pub(super) fn verify_workspace(
+    objects: &Objects,
+    snapshot: &crate::checkpoints::WorkspaceSnapshot,
+    root: &cap_std::fs::Dir,
+) -> Result<(), StoreError> {
+    use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+    use cap_std::fs::{Dir, OpenOptions};
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let entries = workspace::inventory(objects, snapshot)?;
     let expected: std::collections::BTreeSet<_> = entries
         .iter()
         .map(|entry| match entry {

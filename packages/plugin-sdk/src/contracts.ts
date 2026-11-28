@@ -143,6 +143,967 @@ export const contracts: {
     interface: {
       kind: 'service',
       methods: {
+        activateCheckpoint: {
+          mode: 'mutation',
+          input: {
+            $schema: 'https://json-schema.org/draft/2020-12/schema',
+            title: 'AgentCheckpointActivate',
+            type: 'object',
+            properties: {
+              sessionId: {
+                type: 'string',
+              },
+              preparation: {
+                $ref: '#/$defs/RecoveryRef',
+              },
+              preparedInput: {
+                $ref: '#/$defs/AgentCheckpointPrepare',
+              },
+              title: {
+                type: 'string',
+              },
+              permissions: {
+                $ref: '#/$defs/AgentWorkspacePermissions',
+              },
+              backend: {
+                $ref: '#/$defs/AgentBackendPreference',
+              },
+              tools: {
+                description:
+                  'Explicit target capabilities; source tool bindings and credentials are never adopted.',
+                type: 'array',
+                items: {
+                  type: 'string',
+                },
+              },
+              acceptExternalWritersRisk: {
+                type: 'boolean',
+              },
+            },
+            additionalProperties: false,
+            required: [
+              'sessionId',
+              'preparation',
+              'preparedInput',
+              'title',
+              'permissions',
+              'backend',
+              'tools',
+              'acceptExternalWritersRisk',
+            ],
+            $defs: {
+              RecoveryRef: {
+                type: 'object',
+                properties: {
+                  source: {
+                    $ref: '#/$defs/DeploymentRef',
+                  },
+                  namespace: {
+                    $ref: '#/$defs/InstanceId',
+                  },
+                  export: {
+                    type: 'string',
+                  },
+                  method: {
+                    type: 'string',
+                  },
+                  operation: {
+                    type: 'string',
+                    format: 'uuid',
+                  },
+                  fingerprint: {
+                    type: 'string',
+                  },
+                  contract: {
+                    $ref: '#/$defs/RecoveryContract',
+                  },
+                  recovery: {
+                    $ref: '#/$defs/RecoveryProtocol',
+                  },
+                },
+                additionalProperties: false,
+                required: [
+                  'source',
+                  'namespace',
+                  'export',
+                  'method',
+                  'operation',
+                  'fingerprint',
+                  'contract',
+                  'recovery',
+                ],
+              },
+              DeploymentRef: {
+                type: 'object',
+                properties: {
+                  stateDomain: {
+                    type: 'string',
+                  },
+                  deployment: {
+                    type: 'string',
+                    format: 'uuid',
+                  },
+                  revision: {
+                    type: 'integer',
+                    format: 'uint64',
+                    minimum: 0,
+                  },
+                },
+                additionalProperties: false,
+                required: ['stateDomain', 'deployment', 'revision'],
+              },
+              InstanceId: {
+                description:
+                  'Hierarchical, stable source keys. Display aliases never become data identities.',
+                type: 'array',
+                items: {
+                  type: 'string',
+                  format: 'uuid',
+                },
+              },
+              RecoveryContract: {
+                description:
+                  'Contract identity for a journal lookup. The original request retains the\ncomplete contract; a receipt carries only its digest.',
+                type: 'object',
+                properties: {
+                  name: {
+                    type: 'string',
+                  },
+                  version: {
+                    type: 'integer',
+                    format: 'uint32',
+                    minimum: 0,
+                  },
+                  transport: {
+                    $ref: '#/$defs/Transport',
+                  },
+                  digest: {
+                    type: 'string',
+                  },
+                },
+                additionalProperties: false,
+                required: ['name', 'version', 'transport', 'digest'],
+              },
+              Transport: {
+                type: 'string',
+                enum: ['local', 'remote'],
+              },
+              RecoveryProtocol: {
+                type: 'string',
+                enum: ['journal_v1'],
+              },
+              AgentCheckpointPrepare: {
+                description:
+                  "Prepare exactly the checkpoint selected by the target Host's execution grant.\nNo live Session or execution is created by this operation.",
+                type: 'object',
+                properties: {
+                  sessionId: {
+                    type: 'string',
+                  },
+                  parent: {
+                    type: 'string',
+                  },
+                },
+                additionalProperties: false,
+                required: ['sessionId', 'parent'],
+              },
+              AgentWorkspacePermissions: {
+                type: 'object',
+                properties: {
+                  access: {
+                    $ref: '#/$defs/AgentWorkspaceAccess',
+                  },
+                  requestPermissions: {
+                    type: 'boolean',
+                  },
+                },
+                additionalProperties: false,
+                required: ['access', 'requestPermissions'],
+              },
+              AgentWorkspaceAccess: {
+                description:
+                  'Session sandbox policy. Full access disables isolation and permits Computer Use\nwithout additional application, browser or audio consent.',
+                type: 'string',
+                enum: ['read_only', 'workspace_write', 'danger_full_access'],
+              },
+              AgentBackendPreference: {
+                description:
+                  "The next turn's choice, independent of an already admitted execution.\nModel revisions are resolved afresh; preferences never grant execution authority.",
+                oneOf: [
+                  {
+                    type: 'object',
+                    properties: {
+                      kind: {
+                        type: 'string',
+                        const: 'model',
+                      },
+                      connectionId: {
+                        type: 'string',
+                        minLength: 1,
+                      },
+                      modelId: {
+                        type: 'string',
+                        minLength: 1,
+                      },
+                      serviceTier: {
+                        type: ['string', 'null'],
+                      },
+                      thinkingLevel: {
+                        anyOf: [
+                          {
+                            $ref: '#/$defs/ThinkingLevel',
+                          },
+                          {
+                            type: 'null',
+                          },
+                        ],
+                      },
+                    },
+                    additionalProperties: false,
+                    required: ['kind', 'connectionId', 'modelId'],
+                  },
+                  {
+                    type: 'object',
+                    properties: {
+                      kind: {
+                        type: 'string',
+                        const: 'executor',
+                      },
+                      selection: {
+                        $ref: '#/$defs/AgentExecutorSelection',
+                      },
+                    },
+                    additionalProperties: false,
+                    required: ['kind', 'selection'],
+                  },
+                ],
+              },
+              ThinkingLevel: {
+                type: 'string',
+                enum: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+              },
+              AgentExecutorSelection: {
+                type: 'object',
+                properties: {
+                  executor: {
+                    type: 'string',
+                    minLength: 1,
+                  },
+                  settings: {
+                    $ref: '#/$defs/ExecutorSettings',
+                  },
+                },
+                additionalProperties: false,
+                required: ['executor', 'settings'],
+              },
+              ExecutorSettings: {
+                description:
+                  'Executor-owned model selection, independent of Host model connections.',
+                type: 'object',
+                properties: {
+                  model: {
+                    type: ['string', 'null'],
+                  },
+                  thinkingLevel: {
+                    anyOf: [
+                      {
+                        $ref: '#/$defs/ExecutorEffort',
+                      },
+                      {
+                        type: 'null',
+                      },
+                    ],
+                  },
+                  runtime: {
+                    type: ['string', 'null'],
+                  },
+                },
+                additionalProperties: false,
+              },
+              ExecutorEffort: {
+                description: "Runtime-native effort, not a Host model's closed reasoning enum.",
+                type: 'string',
+              },
+            },
+          },
+          output: {
+            $schema: 'https://json-schema.org/draft/2020-12/schema',
+            title: 'AgentCheckpointActivated',
+            type: 'object',
+            properties: {
+              session: {
+                $ref: '#/$defs/AgentSession',
+              },
+              logicalSessionId: {
+                type: 'string',
+                format: 'uuid',
+              },
+              activation: {
+                type: 'string',
+                format: 'uuid',
+              },
+            },
+            additionalProperties: false,
+            required: ['session', 'logicalSessionId', 'activation'],
+            $defs: {
+              AgentSession: {
+                type: 'object',
+                properties: {
+                  incognito: {
+                    type: 'boolean',
+                    default: false,
+                  },
+                  kind: {
+                    $ref: '#/$defs/AgentSessionKind',
+                  },
+                  appliedPreset: {
+                    anyOf: [
+                      {
+                        $ref: '#/$defs/AppliedPreset',
+                      },
+                      {
+                        type: 'null',
+                      },
+                    ],
+                  },
+                  parentSessionId: {
+                    description:
+                      'Session that initiated creation, independent of fork ancestry and task ownership.',
+                    type: ['string', 'null'],
+                  },
+                  ancestorIds: {
+                    description:
+                      'Ordered live ancestor session ids from immediate parent to top-level root.',
+                    type: 'array',
+                    items: {
+                      type: 'string',
+                    },
+                  },
+                  parentTitle: {
+                    description:
+                      'Title of the immediate live parent session when this session is a child.',
+                    type: ['string', 'null'],
+                  },
+                  branch: {
+                    anyOf: [
+                      {
+                        $ref: '#/$defs/AgentSessionBranch',
+                      },
+                      {
+                        type: 'null',
+                      },
+                    ],
+                  },
+                  backend: {
+                    anyOf: [
+                      {
+                        $ref: '#/$defs/AgentBackendPreference',
+                      },
+                      {
+                        type: 'null',
+                      },
+                    ],
+                  },
+                  tools: {
+                    type: ['array', 'null'],
+                    items: {
+                      type: 'string',
+                    },
+                  },
+                  dataSource: {
+                    $ref: '#/$defs/AgentDataSource',
+                  },
+                  permissions: {
+                    $ref: '#/$defs/AgentWorkspacePermissions',
+                  },
+                  boundaryRevision: {
+                    type: 'integer',
+                    format: 'uint64',
+                    minimum: 0,
+                  },
+                  binding: {
+                    $ref: '#/$defs/BindingStamp',
+                  },
+                  id: {
+                    type: 'string',
+                  },
+                  title: {
+                    type: 'string',
+                  },
+                  labels: {
+                    type: 'array',
+                    items: {
+                      type: 'string',
+                    },
+                  },
+                  workspace: {
+                    $ref: '#/$defs/AgentWorkspace',
+                  },
+                  revision: {
+                    type: 'integer',
+                    format: 'uint64',
+                    minimum: 0,
+                  },
+                  createdAt: {
+                    type: 'integer',
+                    format: 'uint64',
+                    minimum: 0,
+                    default: 0,
+                  },
+                  updatedAt: {
+                    type: 'integer',
+                    format: 'uint64',
+                    minimum: 0,
+                  },
+                  archived: {
+                    type: 'boolean',
+                  },
+                  pinned: {
+                    type: 'boolean',
+                  },
+                  hasUnread: {
+                    type: 'boolean',
+                  },
+                  hasActiveChildren: {
+                    description:
+                      'Whether at least one direct unarchived child conversation is currently working.',
+                    type: 'boolean',
+                    default: false,
+                  },
+                  tailMessageId: {
+                    description:
+                      'Exact durable visible tail accepted by markRead; independent of preview clocks.',
+                    type: ['string', 'null'],
+                  },
+                  activity: {
+                    $ref: '#/$defs/AgentSessionActivity',
+                  },
+                },
+                additionalProperties: false,
+                required: [
+                  'kind',
+                  'parentSessionId',
+                  'branch',
+                  'dataSource',
+                  'permissions',
+                  'boundaryRevision',
+                  'binding',
+                  'id',
+                  'title',
+                  'labels',
+                  'workspace',
+                  'revision',
+                  'updatedAt',
+                  'archived',
+                  'pinned',
+                  'hasUnread',
+                  'tailMessageId',
+                  'activity',
+                ],
+              },
+              AgentSessionKind: {
+                type: 'string',
+                enum: ['agent', 'room'],
+              },
+              AppliedPreset: {
+                description:
+                  'Immutable execution configuration captured when a session is created.',
+                type: 'object',
+                properties: {
+                  id: {
+                    type: 'string',
+                    format: 'uuid',
+                  },
+                  revision: {
+                    $ref: '#/$defs/PresetRevision',
+                  },
+                  name: {
+                    type: 'string',
+                  },
+                  instruction: {
+                    type: 'string',
+                  },
+                  model: {
+                    $ref: '#/$defs/ModelSelection',
+                  },
+                  thinkingLevel: {
+                    anyOf: [
+                      {
+                        $ref: '#/$defs/ThinkingLevel',
+                      },
+                      {
+                        type: 'null',
+                      },
+                    ],
+                  },
+                },
+                additionalProperties: false,
+                required: ['id', 'revision', 'name', 'instruction', 'model'],
+              },
+              PresetRevision: {
+                type: 'integer',
+                format: 'uint64',
+                minimum: 1,
+                maximum: 9007199254740991,
+              },
+              ModelSelection: {
+                description:
+                  'Selected model and optional service tier, resolved from the connection at admission.',
+                type: 'object',
+                properties: {
+                  serviceTier: {
+                    type: ['string', 'null'],
+                  },
+                  connectionId: {
+                    type: 'string',
+                    minLength: 1,
+                  },
+                  modelId: {
+                    type: 'string',
+                    minLength: 1,
+                  },
+                },
+                required: ['connectionId', 'modelId'],
+              },
+              ThinkingLevel: {
+                type: 'string',
+                enum: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+              },
+              AgentSessionBranch: {
+                description:
+                  'Frozen conversation ancestry for presentation, not authority over the source.',
+                type: 'object',
+                properties: {
+                  sessionId: {
+                    type: 'string',
+                    minLength: 1,
+                  },
+                  position: {
+                    $ref: '#/$defs/AgentForkPosition',
+                  },
+                  side: {
+                    description:
+                      'The branch is a side question of that conversation. Fork results stored\nbefore side questions have no such field.',
+                    type: 'boolean',
+                    default: false,
+                  },
+                },
+                additionalProperties: false,
+                required: ['sessionId', 'position'],
+              },
+              AgentForkPosition: {
+                description: 'A complete logical Turn boundary within the source session.',
+                oneOf: [
+                  {
+                    description: 'Capture an empty history prefix.',
+                    type: 'object',
+                    properties: {
+                      kind: {
+                        type: 'string',
+                        const: 'start',
+                      },
+                    },
+                    required: ['kind'],
+                    additionalProperties: false,
+                  },
+                  {
+                    description: 'Capture all current history, including later compaction facts.',
+                    type: 'object',
+                    properties: {
+                      kind: {
+                        type: 'string',
+                        const: 'end',
+                      },
+                    },
+                    required: ['kind'],
+                    additionalProperties: false,
+                  },
+                  {
+                    description: 'Include the complete target Turn.',
+                    type: 'object',
+                    properties: {
+                      kind: {
+                        type: 'string',
+                        const: 'through_turn',
+                      },
+                      turnId: {
+                        type: 'string',
+                        minLength: 1,
+                      },
+                    },
+                    additionalProperties: false,
+                    required: ['kind', 'turnId'],
+                  },
+                  {
+                    description:
+                      'Exclude the complete target Turn, including its submitted inputs.',
+                    type: 'object',
+                    properties: {
+                      kind: {
+                        type: 'string',
+                        const: 'before_turn',
+                      },
+                      turnId: {
+                        type: 'string',
+                        minLength: 1,
+                      },
+                    },
+                    additionalProperties: false,
+                    required: ['kind', 'turnId'],
+                  },
+                  {
+                    description:
+                      'Include the complete source Turn containing this qualified original row.',
+                    type: 'object',
+                    properties: {
+                      kind: {
+                        type: 'string',
+                        const: 'through_source_turn',
+                      },
+                      position: {
+                        $ref: '#/$defs/HistoryRowAddress',
+                      },
+                    },
+                    additionalProperties: false,
+                    required: ['kind', 'position'],
+                  },
+                  {
+                    description:
+                      'Exclude the complete source Turn containing this qualified original row.',
+                    type: 'object',
+                    properties: {
+                      kind: {
+                        type: 'string',
+                        const: 'before_source_turn',
+                      },
+                      position: {
+                        $ref: '#/$defs/HistoryRowAddress',
+                      },
+                    },
+                    additionalProperties: false,
+                    required: ['kind', 'position'],
+                  },
+                ],
+              },
+              HistoryRowAddress: {
+                description:
+                  'An original row within the actual read capability supplied by the caller.\nMarker paths are relative to that capability; none of these fields grants access.',
+                oneOf: [
+                  {
+                    type: 'object',
+                    properties: {
+                      kind: {
+                        type: 'string',
+                        const: 'live',
+                      },
+                      sequence: {
+                        type: 'integer',
+                        format: 'uint64',
+                        minimum: 0,
+                      },
+                      fact: {
+                        $ref: '#/$defs/FactId',
+                      },
+                      itemIndex: {
+                        type: 'integer',
+                        format: 'uint64',
+                        minimum: 0,
+                      },
+                    },
+                    additionalProperties: false,
+                    required: ['kind', 'sequence', 'fact', 'itemIndex'],
+                  },
+                  {
+                    type: 'object',
+                    properties: {
+                      kind: {
+                        type: 'string',
+                        const: 'snapshot',
+                      },
+                      path: {
+                        type: 'array',
+                        items: {
+                          $ref: '#/$defs/RunId',
+                        },
+                      },
+                      snapshot: {
+                        type: 'string',
+                        format: 'uuid',
+                      },
+                      sequence: {
+                        type: 'integer',
+                        format: 'uint64',
+                        minimum: 0,
+                      },
+                      fact: {
+                        $ref: '#/$defs/FactId',
+                      },
+                      itemIndex: {
+                        type: 'integer',
+                        format: 'uint64',
+                        minimum: 0,
+                      },
+                    },
+                    additionalProperties: false,
+                    required: ['kind', 'path', 'snapshot', 'sequence', 'fact', 'itemIndex'],
+                  },
+                  {
+                    type: 'object',
+                    properties: {
+                      kind: {
+                        type: 'string',
+                        const: 'imported',
+                      },
+                      path: {
+                        type: 'array',
+                        items: {
+                          $ref: '#/$defs/RunId',
+                        },
+                      },
+                      snapshot: {
+                        type: 'string',
+                        format: 'uuid',
+                      },
+                      messageOrdinal: {
+                        type: 'integer',
+                        format: 'uint64',
+                        minimum: 0,
+                      },
+                      partOrdinal: {
+                        type: 'integer',
+                        format: 'uint64',
+                        minimum: 0,
+                      },
+                    },
+                    additionalProperties: false,
+                    required: ['kind', 'path', 'snapshot', 'messageOrdinal', 'partOrdinal'],
+                  },
+                ],
+              },
+              FactId: {
+                type: 'string',
+                format: 'uuid',
+              },
+              RunId: {
+                type: 'string',
+                format: 'uuid',
+              },
+              AgentBackendPreference: {
+                description:
+                  "The next turn's choice, independent of an already admitted execution.\nModel revisions are resolved afresh; preferences never grant execution authority.",
+                oneOf: [
+                  {
+                    type: 'object',
+                    properties: {
+                      kind: {
+                        type: 'string',
+                        const: 'model',
+                      },
+                      connectionId: {
+                        type: 'string',
+                        minLength: 1,
+                      },
+                      modelId: {
+                        type: 'string',
+                        minLength: 1,
+                      },
+                      serviceTier: {
+                        type: ['string', 'null'],
+                      },
+                      thinkingLevel: {
+                        anyOf: [
+                          {
+                            $ref: '#/$defs/ThinkingLevel',
+                          },
+                          {
+                            type: 'null',
+                          },
+                        ],
+                      },
+                    },
+                    additionalProperties: false,
+                    required: ['kind', 'connectionId', 'modelId'],
+                  },
+                  {
+                    type: 'object',
+                    properties: {
+                      kind: {
+                        type: 'string',
+                        const: 'executor',
+                      },
+                      selection: {
+                        $ref: '#/$defs/AgentExecutorSelection',
+                      },
+                    },
+                    additionalProperties: false,
+                    required: ['kind', 'selection'],
+                  },
+                ],
+              },
+              AgentExecutorSelection: {
+                type: 'object',
+                properties: {
+                  executor: {
+                    type: 'string',
+                    minLength: 1,
+                  },
+                  settings: {
+                    $ref: '#/$defs/ExecutorSettings',
+                  },
+                },
+                additionalProperties: false,
+                required: ['executor', 'settings'],
+              },
+              ExecutorSettings: {
+                description:
+                  'Executor-owned model selection, independent of Host model connections.',
+                type: 'object',
+                properties: {
+                  model: {
+                    type: ['string', 'null'],
+                  },
+                  thinkingLevel: {
+                    anyOf: [
+                      {
+                        $ref: '#/$defs/ExecutorEffort',
+                      },
+                      {
+                        type: 'null',
+                      },
+                    ],
+                  },
+                  runtime: {
+                    type: ['string', 'null'],
+                  },
+                },
+                additionalProperties: false,
+              },
+              ExecutorEffort: {
+                description: "Runtime-native effort, not a Host model's closed reasoning enum.",
+                type: 'string',
+              },
+              AgentDataSource: {
+                description:
+                  'Stable business-data origin, independent of package or activation revisions.',
+                type: 'object',
+                properties: {
+                  stateDomain: {
+                    type: 'string',
+                  },
+                  deployment: {
+                    type: 'string',
+                    format: 'uuid',
+                  },
+                  namespace: {
+                    $ref: '#/$defs/InstanceId',
+                  },
+                },
+                additionalProperties: false,
+                required: ['stateDomain', 'deployment', 'namespace'],
+              },
+              InstanceId: {
+                description:
+                  'Hierarchical, stable source keys. Display aliases never become data identities.',
+                type: 'array',
+                items: {
+                  type: 'string',
+                  format: 'uuid',
+                },
+              },
+              AgentWorkspacePermissions: {
+                type: 'object',
+                properties: {
+                  access: {
+                    $ref: '#/$defs/AgentWorkspaceAccess',
+                  },
+                  requestPermissions: {
+                    type: 'boolean',
+                  },
+                },
+                additionalProperties: false,
+                required: ['access', 'requestPermissions'],
+              },
+              AgentWorkspaceAccess: {
+                description:
+                  'Session sandbox policy. Full access disables isolation and permits Computer Use\nwithout additional application, browser or audio consent.',
+                type: 'string',
+                enum: ['read_only', 'workspace_write', 'danger_full_access'],
+              },
+              BindingStamp: {
+                type: 'object',
+                properties: {
+                  id: {
+                    type: 'string',
+                    format: 'uuid',
+                  },
+                  permissionEpoch: {
+                    type: 'integer',
+                    format: 'uint64',
+                    minimum: 0,
+                  },
+                },
+                additionalProperties: false,
+                required: ['id', 'permissionEpoch'],
+              },
+              AgentWorkspace: {
+                type: 'object',
+                properties: {
+                  worktree: {
+                    description:
+                      'Native owner allocation; never accepted from a caller as workspace authority.',
+                    anyOf: [
+                      {
+                        $ref: '#/$defs/Binding',
+                      },
+                      {
+                        type: 'null',
+                      },
+                    ],
+                  },
+                  projectId: {
+                    description: "Optional membership in this Agent's canonical Project catalog.",
+                    type: ['string', 'null'],
+                    format: 'uuid',
+                  },
+                  path: {
+                    type: 'string',
+                    minLength: 1,
+                  },
+                },
+                additionalProperties: false,
+                required: ['path'],
+              },
+              Binding: {
+                description: 'Immutable allocation intent, not the current child branch or HEAD.',
+                type: 'object',
+                properties: {
+                  id: {
+                    type: 'string',
+                  },
+                  common_dir: {
+                    type: 'string',
+                  },
+                  source: {
+                    type: 'string',
+                  },
+                  base_commit: {
+                    type: 'string',
+                  },
+                  directory: {
+                    type: 'string',
+                  },
+                },
+                additionalProperties: false,
+                required: ['id', 'common_dir', 'source', 'base_commit', 'directory'],
+              },
+              AgentSessionActivity: {
+                type: 'string',
+                enum: ['idle', 'working', 'waiting'],
+              },
+            },
+          },
+          resources: {},
+        },
         askQuickQuestion: {
           mode: 'mutation',
           input: {
@@ -34708,6 +35669,138 @@ export const contracts: {
             },
             additionalProperties: false,
             required: ['sourceTurnId', 'policyRevision'],
+          },
+          resources: {},
+        },
+        prepareCheckpoint: {
+          mode: 'mutation',
+          input: {
+            $schema: 'https://json-schema.org/draft/2020-12/schema',
+            title: 'AgentCheckpointPrepare',
+            description:
+              "Prepare exactly the checkpoint selected by the target Host's execution grant.\nNo live Session or execution is created by this operation.",
+            type: 'object',
+            properties: {
+              sessionId: {
+                type: 'string',
+              },
+              parent: {
+                type: 'string',
+              },
+            },
+            additionalProperties: false,
+            required: ['sessionId', 'parent'],
+          },
+          output: {
+            $schema: 'https://json-schema.org/draft/2020-12/schema',
+            title: 'AgentCheckpointPrepared',
+            type: 'object',
+            properties: {
+              operation: {
+                type: 'string',
+                format: 'uuid',
+              },
+              sessionId: {
+                type: 'string',
+              },
+              logicalSessionId: {
+                type: 'string',
+                format: 'uuid',
+              },
+              head: {
+                $ref: '#/$defs/AgentHistoryCheckpointHead',
+              },
+              path: {
+                type: 'string',
+              },
+              workspace: {
+                anyOf: [
+                  {
+                    $ref: '#/$defs/AgentCheckpointWorkspaceSnapshot',
+                  },
+                  {
+                    type: 'null',
+                  },
+                ],
+              },
+            },
+            additionalProperties: false,
+            required: ['operation', 'sessionId', 'logicalSessionId', 'head', 'path', 'workspace'],
+            $defs: {
+              AgentHistoryCheckpointHead: {
+                type: 'object',
+                properties: {
+                  revision: {
+                    type: 'string',
+                    format: 'uuid',
+                  },
+                  manifest: {
+                    $ref: '#/$defs/AgentHistoryCheckpointObject',
+                  },
+                },
+                additionalProperties: false,
+                required: ['revision', 'manifest'],
+              },
+              AgentHistoryCheckpointObject: {
+                type: 'object',
+                properties: {
+                  digest: {
+                    type: 'string',
+                    pattern: '^[a-f0-9]{64}$',
+                  },
+                  bytes: {
+                    type: 'integer',
+                    format: 'uint64',
+                    minimum: 0,
+                    maximum: 9007199254740991,
+                  },
+                },
+                additionalProperties: false,
+                required: ['digest', 'bytes'],
+              },
+              AgentCheckpointWorkspaceSnapshot: {
+                type: 'object',
+                properties: {
+                  consistency: {
+                    $ref: '#/$defs/AgentCheckpointWorkspaceConsistency',
+                  },
+                  warning: {
+                    $ref: '#/$defs/AgentCheckpointWorkspaceWarning',
+                  },
+                  inventory: {
+                    $ref: '#/$defs/AgentHistoryCheckpointObject',
+                  },
+                },
+                additionalProperties: false,
+                required: ['consistency', 'warning', 'inventory'],
+              },
+              AgentCheckpointWorkspaceConsistency: {
+                oneOf: [
+                  {
+                    description:
+                      'The caller confirms all other writers remain paused for the entire copy.',
+                    type: 'string',
+                    const: 'caller_confirmed_quiescent',
+                  },
+                  {
+                    description:
+                      'Files may not represent one instant; successful digest checks do not change this.',
+                    type: 'string',
+                    const: 'unverified',
+                  },
+                ],
+              },
+              AgentCheckpointWorkspaceWarning: {
+                oneOf: [
+                  {
+                    description:
+                      'Display to users: pause editors, terminals and other writers for the entire\ncapture. Hash verification is not a point-in-time consistency guarantee.',
+                    type: 'string',
+                    const: 'external_writers_not_fenced',
+                  },
+                ],
+              },
+            },
           },
           resources: {},
         },

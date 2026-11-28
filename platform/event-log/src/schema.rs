@@ -65,6 +65,13 @@ pub const ROOT_MIGRATIONS: &[crate::migration::Migration] = &[
         configure: Some(crate::content::register_sql_functions),
         data: Some(crate::applications::migrate_v65::migrate_compress_application_tables),
     },
+    crate::migration::Migration {
+        version: 68,
+        description: "checkpoint handoff preparation",
+        sql: include_str!("../migrations/0068_checkpoint_handoff.sql"),
+        configure: None,
+        data: None,
+    },
 ];
 
 pub(crate) fn initialize_connection(

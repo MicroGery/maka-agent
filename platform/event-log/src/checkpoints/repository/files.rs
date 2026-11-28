@@ -204,6 +204,11 @@ impl FileRepository {
                     "checkpoint execution authority",
                     include_str!("../../../migrations/repository/0003_execution.sql"),
                 ),
+                crate::migration::Migration::sql(
+                    4,
+                    "checkpoint execution handoff provenance",
+                    include_str!("../../../migrations/repository/0004_handoff.sql"),
+                ),
             ],
         )?;
         let id: Option<String> = tx

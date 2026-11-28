@@ -2607,6 +2607,8 @@ pub fn contract() -> Contract {
                     method::<HistoryCheckpointRead, Option<HistoryCheckpointFrame>>(MethodMode::Subscription),
                 ),
                 ("loadHistoryCheckpoint".into(), method::<HistoryCheckpointRead, CheckpointLoad>(MethodMode::Mutation)),
+                ("prepareCheckpoint".into(), method::<CheckpointPrepare, CheckpointPrepared>(MethodMode::Mutation)),
+                ("activateCheckpoint".into(), method::<CheckpointActivate, CheckpointActivated>(MethodMode::Mutation)),
                 ("restoreSessionCheckpoint".into(), method::<SessionCheckpointRestore, SessionCheckpointRestored>(MethodMode::Mutation)),
                 ("sessionCheckpointRestoreReceipt".into(), method::<SessionCheckpointRestoreReceiptRead, SessionCheckpointRestoreReceipt>(MethodMode::Query)),
                 ("historyCheckpointLoadReceipt".into(), method::<CheckpointLoadReceiptRead, CheckpointLoadReceipt>(MethodMode::Query)),

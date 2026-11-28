@@ -674,6 +674,7 @@ impl Statement for CaptureFork {
                     self.history.clone(),
                     CaptureRequest { id: self.id, cut },
                     None,
+                    None,
                 )
                 .execute(c)?;
                 (None, source, prepared.value)

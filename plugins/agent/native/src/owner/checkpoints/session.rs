@@ -102,11 +102,32 @@ impl Owner {
                             id,
                             cut: history.capture().await.map_err(failure)?,
                         };
+                        let continuation = if owner.store.checkpoint_execution().is_some()
+                            && mode.is_some()
+                            && !owner.bot.is_or_was(&capture.session_id).await?
+                            && !owner.todo.has_items(&capture.session_id).await?
+                            && !owner.scheduler.load().await?.plans.values().any(|saved| {
+                                saved.plan.task.effect.target().session_id == capture.session_id
+                            })
+                            && owner
+                                .goals
+                                .repository
+                                .read(&capture.session_id)
+                                .await
+                                .map_err(|e| e.to_string())?
+                                .is_none()
+                            && session.configuration.parent_session_id.is_none()
+                        {
+                            Some(guard.quiescence.clone())
+                        } else {
+                            None
+                        };
                         admission = Some(guard);
                         history
-                            .capture_snapshot_guarded(
+                            .capture_checkpoint_snapshot(
                                 request,
                                 metadata,
+                                continuation,
                                 scope.cancellation.child_token(),
                             )
                             .await

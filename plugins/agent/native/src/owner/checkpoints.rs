@@ -19,6 +19,7 @@
 
 //! Authorized history publication and bounded reads through the Agent service.
 use super::*;
+mod handoff;
 mod load;
 mod restore;
 mod session;

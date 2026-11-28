@@ -94,6 +94,15 @@ pub struct Manifest {
     pub origin: Origin,
     pub inventory: Option<ContentRef>,
     pub objects: u64,
+    /// Source-owned eligibility captured before export, never inferred from an
+    /// imported archive's missing live tables. This is not an execution grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<Continuation>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Continuation {
+    OrdinaryNativeV1,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -296,6 +305,9 @@ impl Manifest {
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.version != SNAPSHOT_VERSION {
             return Err("unsupported Agent history snapshot version");
+        }
+        if self.continuation.is_some() && !matches!(self.origin, Origin::Canonical { .. }) {
+            return Err("continuation requires a canonical source");
         }
         if let Some(reference) = &self.inventory {
             reference.validate()?;

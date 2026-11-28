@@ -85,84 +85,144 @@ fn status(db: &Connection, grant: &Grant, at: u64) -> Result<Status, StoreError>
     Ok(status)
 }
 
+fn claim(
+    db: &Connection,
+    request: Claim,
+    handoff: Option<Binding>,
+) -> Result<ClaimResult, StoreError> {
+    if request.activation.is_nil() {
+        return Err(invalid("execution activation is nil"));
+    }
+    request.binding.source.validate()?;
+    let tx = transaction(db)?;
+    let previous: Option<(String, String, Option<String>)> = tx.query_row(
+        "SELECT request_json,receipt_json,handoff_json FROM checkpoint_execution_claims WHERE activation_id=?",
+        [request.activation.to_string()],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).optional()?;
+    if let Some((original, receipt, original_handoff)) = previous {
+        if serde_json::from_str::<Claim>(&original)? != request
+            || original_handoff
+                .as_deref()
+                .map(serde_json::from_str::<Binding>)
+                .transpose()?
+                != handoff
+        {
+            return Err(invalid("execution claim identity conflict"));
+        }
+        return Ok(serde_json::from_str(&receipt)?);
+    }
+    if let Some(source) = &handoff {
+        if source.identity != request.binding.identity
+            || source.source.root_id == request.binding.source.root_id
+            || request.start.is_none()
+            || sql::lookup(&tx, &source.source, source.identity.agent)?.as_ref() != Some(source)
+        {
+            return Err(invalid("invalid checkpoint execution handoff binding"));
+        }
+        if sql::lookup(&tx, &request.binding.source, request.binding.identity.agent)?.is_some() {
+            return Err(invalid("handoff destination is already bound"));
+        }
+        let managed: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM checkpoint_executions WHERE session_id=?)",
+            [source.identity.session.to_string()],
+            |r| r.get(0),
+        )?;
+        if !managed {
+            return Err(invalid(
+                "handoff requires a managed, stopped source environment",
+            ));
+        }
+    } else if sql::lookup(&tx, &request.binding.source, request.binding.identity.agent)?.as_ref()
+        != Some(&request.binding)
+    {
+        return Err(invalid("execution source has no matching Session binding"));
+    }
+    let expires_at = deadline(now()?, request.lease_millis)?;
+    let busy: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM checkpoint_executions WHERE session_id=? AND state!='stopped')",
+        [request.binding.identity.session.to_string()],
+        |r| r.get(0),
+    )?;
+    let head = sql::head(&tx, &request.binding.identity)?;
+    let actual = head.as_ref().map(|h| h.head.revision);
+    if handoff.is_none() && head.as_ref().is_some_and(|h| h.binding != request.binding) {
+        return Err(invalid(
+            "cross-Root checkpoint start requires a handoff grant",
+        ));
+    }
+    if handoff.as_ref().is_some_and(|source| {
+        head.as_ref()
+            .is_some_and(|h| Some(h.head.revision) == request.start && &h.binding != source)
+    }) {
+        return Err(invalid("handoff checkpoint provenance differs"));
+    }
+    let receipt = if busy {
+        ClaimResult::Busy
+    } else if actual != request.start {
+        ClaimResult::Conflict { actual }
+    } else {
+        let previous: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(generation),0) FROM checkpoint_executions WHERE session_id=?",
+            [request.binding.identity.session.to_string()],
+            |r| r.get(0),
+        )?;
+        let generation = previous
+            .checked_add(1)
+            .ok_or_else(|| invalid("execution generation exhausted"))?;
+        ClaimResult::Granted {
+            grant: Box::new(Grant {
+                activation: request.activation,
+                generation: generation as u64,
+                binding: request.binding.clone(),
+                start: request.start,
+                permissions: request.permissions.clone(),
+                handoff: handoff.clone(),
+            }),
+            expires_at,
+        }
+    };
+    tx.execute(
+        "INSERT INTO checkpoint_execution_claims (activation_id,request_json,receipt_json,handoff_json) VALUES(?,?,?,?)",
+        params![
+            request.activation.to_string(),
+            serde_json::to_string(&request)?,
+            serde_json::to_string(&receipt)?,
+            handoff.as_ref().map(serde_json::to_string).transpose()?,
+        ],
+    )?;
+    if let ClaimResult::Granted { grant, expires_at } = &receipt {
+        if handoff.is_some() {
+            tx.execute("INSERT INTO checkpoint_repository_sources(source_key,source_json,session_id) VALUES(?,?,?)",
+                params![request.binding.source.key()?,serde_json::to_string(&request.binding.source)?,request.binding.identity.session.to_string()])?;
+        }
+        tx.execute(
+            "INSERT INTO checkpoint_executions (activation_id,session_id,generation,grant_json,state,expires_at) VALUES(?,?,?,?,'active',?)",
+            params![
+                grant.activation.to_string(),
+                grant.binding.identity.session.to_string(),
+                i64::try_from(grant.generation).map_err(|_| invalid("execution generation overflow"))?,
+                serde_json::to_string(grant)?,
+                *expires_at as i64,
+            ],
+        )?;
+    }
+    tx.commit().map_err(StoreError::CommitUnknown)?;
+    Ok(receipt)
+}
+
 impl ExecutionAuthority for FileRepository {
     fn repository_identity(&self) -> &str {
         self.identity()
     }
     fn claim(&self, request: Claim) -> BoxFuture<'_, Result<ClaimResult, StoreError>> {
-        self.run(move |db| {
-            if request.activation.is_nil() {
-                return Err(invalid("execution activation is nil"));
-            }
-            request.binding.source.validate()?;
-            let tx = transaction(db)?;
-            let previous: Option<(String, String)> = tx.query_row(
-                "SELECT request_json,receipt_json FROM checkpoint_execution_claims WHERE activation_id=?",
-                [request.activation.to_string()],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            ).optional()?;
-            if let Some((original, receipt)) = previous {
-                if serde_json::from_str::<Claim>(&original)? != request {
-                    return Err(invalid("execution claim identity conflict"));
-                }
-                return Ok(serde_json::from_str(&receipt)?);
-            }
-            if sql::binding_for(&tx, &request.binding.identity)?.as_ref() != Some(&request.binding) {
-                return Err(invalid("execution source has no matching Session binding"));
-            }
-            let expires_at = deadline(now()?, request.lease_millis)?;
-            let busy: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM checkpoint_executions WHERE session_id=? AND state!='stopped')",
-                [request.binding.identity.session.to_string()],
-                |r| r.get(0),
-            )?;
-            let actual = sql::head(&tx, &request.binding.identity)?.map(|h| h.head.revision);
-            let receipt = if busy {
-                ClaimResult::Busy
-            } else if actual != request.start {
-                ClaimResult::Conflict { actual }
-            } else {
-                let previous: i64 = tx.query_row(
-                    "SELECT COALESCE(MAX(generation),0) FROM checkpoint_executions WHERE session_id=?",
-                    [request.binding.identity.session.to_string()],
-                    |r| r.get(0),
-                )?;
-                let generation = previous.checked_add(1)
-                    .ok_or_else(|| invalid("execution generation exhausted"))?;
-                ClaimResult::Granted {
-                    grant: Box::new(Grant {
-                        activation: request.activation,
-                        generation: generation as u64,
-                        binding: request.binding.clone(),
-                        start: request.start,
-                        permissions: request.permissions.clone(),
-                    }),
-                    expires_at,
-                }
-            };
-            tx.execute(
-                "INSERT INTO checkpoint_execution_claims (activation_id,request_json,receipt_json) VALUES(?,?,?)",
-                params![
-                    request.activation.to_string(),
-                    serde_json::to_string(&request)?,
-                    serde_json::to_string(&receipt)?,
-                ],
-            )?;
-            if let ClaimResult::Granted { grant, expires_at } = &receipt {
-                tx.execute(
-                    "INSERT INTO checkpoint_executions (activation_id,session_id,generation,grant_json,state,expires_at) VALUES(?,?,?,?,'active',?)",
-                    params![
-                        grant.activation.to_string(),
-                        grant.binding.identity.session.to_string(),
-                        i64::try_from(grant.generation).map_err(|_| invalid("execution generation overflow"))?,
-                        serde_json::to_string(grant)?,
-                        *expires_at as i64,
-                    ],
-                )?;
-            }
-            tx.commit().map_err(StoreError::CommitUnknown)?;
-            Ok(receipt)
-        })
+        self.run(move |db| claim(db, request, None))
+    }
+    fn claim_handoff(
+        &self,
+        request: HandoffClaim,
+    ) -> BoxFuture<'_, Result<ClaimResult, StoreError>> {
+        self.run(move |db| claim(db, request.target, Some(request.source)))
     }
     fn observe(&self, grant: Arc<Grant>) -> BoxFuture<'_, Result<Status, StoreError>> {
         self.run(move |db| {

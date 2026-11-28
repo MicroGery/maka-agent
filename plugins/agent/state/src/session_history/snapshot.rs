@@ -31,6 +31,8 @@ mod archive;
 mod capture;
 pub(crate) mod catalog;
 mod checkpoint;
+#[cfg(test)]
+mod continuation_tests;
 pub(in crate::session_history) mod metrics_metadata;
 mod model_evidence;
 pub(crate) use checkpoint::checkpoint_member;
@@ -132,6 +134,7 @@ impl SessionHistory {
                 self.namespace.clone(),
                 request.clone(),
                 None,
+                None,
             ))
             .await?;
         let snapshot = self.bind_captured_snapshot(request.id, manifest);
@@ -144,10 +147,30 @@ impl SessionHistory {
         guard: maka_event_log::root_store::SessionRevisionGuard,
         stop: tokio_util::sync::CancellationToken,
     ) -> Result<Snapshot, StoreError> {
+        self.capture_checkpoint_snapshot(request, guard, None, stop)
+            .await
+    }
+    /// The native owner supplies quiescence only while its Goal and run admission
+    /// gates are held and the source has no Goal. Source relationships are checked
+    /// again by the capture transaction; ordinary captures remain inspection-only.
+    pub async fn capture_checkpoint_snapshot(
+        &self,
+        request: CaptureRequest,
+        guard: maka_event_log::root_store::SessionRevisionGuard,
+        continuation: Option<crate::SessionQuiescenceGuard>,
+        stop: tokio_util::sync::CancellationToken,
+    ) -> Result<Snapshot, StoreError> {
         if guard.session_id() != self.namespace.session || !guard.same_root(&self.data) {
             return Err(invalid(
                 "source revision guard belongs to another actual Root/session",
             ));
+        }
+        if let Some(q) = &continuation
+            && (q.owner() != &self.namespace.owner
+                || q.session() != self.namespace.session
+                || !guard.same_root(q.data_writer()))
+        {
+            return Err(invalid("continuation guard belongs to another source"));
         }
         let manifest = self
             .data
@@ -155,6 +178,7 @@ impl SessionHistory {
                 self.namespace.clone(),
                 request.clone(),
                 Some(guard),
+                continuation,
             ))
             .await?;
         let snapshot = self.bind_captured_snapshot(request.id, manifest);

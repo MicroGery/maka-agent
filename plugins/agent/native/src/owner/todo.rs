@@ -64,6 +64,16 @@ impl Todo {
     pub async fn finish(&self) -> Result<(), String> {
         self.storage.finish().await
     }
+    pub(super) async fn has_items(&self, session: &str) -> Result<bool, String> {
+        Ok(!self
+            .repository
+            .read(session)
+            .await
+            .map_err(|e| e.to_string())?
+            .document
+            .items
+            .is_empty())
+    }
     pub fn tools(self: &Arc<Self>) -> Vec<ToolRegistration> {
         [
             ("todo_read", "Read this session's checklist. Completed means model-reported progress, not verified execution.", serde_json::to_value(schemars::schema_for!(Read)).expect("todo schema")),

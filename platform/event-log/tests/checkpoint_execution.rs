@@ -24,8 +24,8 @@ use maka_event_log::{
     checkpoints::{
         HistorySnapshot, Manifest, ObjectRef, Scope,
         execution::{
-            Claim, ClaimResult, Environment, Execution, ExecutionAuthority, Grant, Permissions,
-            Renewal, Status,
+            Claim, ClaimResult, Environment, Execution, ExecutionAuthority, Grant, HandoffClaim,
+            Permissions, Renewal, Status,
         },
         repository::{
             Binding, Commit, CommitReceipt, SessionRepository, Source, VerifiedCheckpoint,
@@ -443,6 +443,9 @@ impl ExecutionAuthority for UnavailableAuthority {
     fn claim(&self, r: Claim) -> BoxFuture<'_, Result<ClaimResult, StoreError>> {
         self.inner.claim(r)
     }
+    fn claim_handoff(&self, r: HandoffClaim) -> BoxFuture<'_, Result<ClaimResult, StoreError>> {
+        self.inner.claim_handoff(r)
+    }
     fn observe(&self, g: Arc<Grant>) -> BoxFuture<'_, Result<Status, StoreError>> {
         if self.unavailable.load(std::sync::atomic::Ordering::SeqCst) {
             Box::pin(async { Err(StoreError::ConnectionClosed) })
@@ -616,4 +619,318 @@ async fn hung_stop_acknowledgement_returns_without_authorizing_handoff() {
         f.repository.claim(f.claim()).await.unwrap(),
         ClaimResult::Busy
     );
+}
+
+#[tokio::test]
+async fn cross_root_handoff_preserves_publisher_until_target_commits() {
+    let f = Fixture::new().await;
+    let source = f.grant().await;
+    let original = f.commit();
+    let first = ExecutionAuthority::commit(
+        &f.repository,
+        source.clone(),
+        original.clone(),
+        f.verified(),
+    )
+    .await
+    .unwrap();
+    let CommitReceipt::Published { head } = &first else {
+        panic!()
+    };
+    let mut target = f.claim();
+    target.start = Some(head.revision);
+    target.binding.source.root_id = "c".repeat(64);
+    target.binding.source.session = "target-session".into();
+    target.binding.source.scope.deployment = Uuid::new_v4();
+    let request = HandoffClaim {
+        source: f.binding.clone(),
+        target,
+    };
+    assert_eq!(
+        f.repository.claim_handoff(request.clone()).await.unwrap(),
+        ClaimResult::Busy
+    );
+    let execution = Execution::attach(Arc::new(f.repository.clone()), source.clone())
+        .await
+        .unwrap();
+    execution
+        .stop(&DrainedEnvironment::default())
+        .await
+        .unwrap();
+    // A failed original claim is stable; retrying it cannot mint a grant.
+    assert_eq!(
+        f.repository.claim_handoff(request.clone()).await.unwrap(),
+        ClaimResult::Busy
+    );
+    let request = HandoffClaim {
+        target: Claim {
+            activation: Uuid::new_v4(),
+            ..request.target
+        },
+        ..request
+    };
+    let target = granted(f.repository.claim_handoff(request.clone()).await.unwrap());
+    assert!(target.generation > source.generation);
+    // The target binding must not be downgraded to an ordinary local-start grant.
+    let mut bypass = request.target.clone();
+    bypass.activation = Uuid::new_v4();
+    assert!(f.repository.claim(bypass).await.is_err());
+    let reopened = FileRepository::open(f.directory.path()).unwrap();
+    assert_eq!(
+        granted(reopened.claim_handoff(request.clone()).await.unwrap()),
+        target
+    );
+    let retained = reopened
+        .read_head(f.binding.identity.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.binding, f.binding);
+    assert_eq!(retained.head, *head);
+    assert_eq!(
+        reopened
+            .lookup(target.binding.source.clone(), f.binding.identity.agent)
+            .await
+            .unwrap(),
+        Some(target.binding.clone())
+    );
+    let objects = reopened.objects();
+    let mut manifest = f.verified().manifest().clone();
+    manifest.root_id = target.binding.source.root_id.clone();
+    manifest.scope = target.binding.source.scope.clone();
+    manifest.session_id = target.binding.source.session.clone();
+    let object = objects
+        .put(&mut &serde_json::to_vec(&manifest).unwrap()[..])
+        .unwrap();
+    let next = Commit {
+        binding: target.binding.clone(),
+        expected_revision: Some(head.revision),
+        manifest: object.clone(),
+        operation: Uuid::new_v4(),
+        fingerprint: "d".repeat(64),
+    };
+    let verified = VerifiedCheckpoint::verify(objects.as_ref(), object).unwrap();
+    let CommitReceipt::Published { head: second } =
+        ExecutionAuthority::commit(&reopened, target.clone(), next, verified)
+            .await
+            .unwrap()
+    else {
+        panic!()
+    };
+    assert_ne!(second.revision, head.revision);
+    assert_eq!(
+        reopened
+            .read_head(f.binding.identity.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .binding,
+        target.binding
+    );
+    assert_eq!(
+        ExecutionAuthority::receipt(&reopened, source.clone(), original.clone())
+            .await
+            .unwrap(),
+        Some(first)
+    );
+    assert!(
+        ExecutionAuthority::commit(
+            &reopened,
+            source,
+            Commit {
+                operation: Uuid::new_v4(),
+                ..original
+            },
+            f.verified()
+        )
+        .await
+        .is_err()
+    );
+    let mut wrong = request;
+    wrong.source.source.session = "forged-source".into();
+    assert!(reopened.claim_handoff(wrong).await.is_err());
+}
+
+#[tokio::test]
+async fn handoff_rejects_unmanaged_source_wrong_agent_existing_target_and_stale_start() {
+    let f = Fixture::new().await;
+    let CommitReceipt::Published { head } =
+        SessionRepository::commit(&f.repository, f.commit(), f.verified())
+            .await
+            .unwrap()
+    else {
+        panic!()
+    };
+    let mut target = f.claim();
+    target.start = Some(head.revision);
+    target.binding.source.root_id = "c".repeat(64);
+    let request = HandoffClaim {
+        source: f.binding.clone(),
+        target,
+    };
+    assert!(f.repository.claim_handoff(request.clone()).await.is_err());
+    let mut source_request = f.claim();
+    source_request.start = Some(head.revision);
+    let source = granted(f.repository.claim(source_request).await.unwrap());
+    Execution::attach(Arc::new(f.repository.clone()), source)
+        .await
+        .unwrap()
+        .stop(&DrainedEnvironment::default())
+        .await
+        .unwrap();
+    let mut wrong = request.clone();
+    wrong.target.binding.identity.agent = Uuid::new_v4();
+    assert!(f.repository.claim_handoff(wrong).await.is_err());
+    let mut wrong = request.clone();
+    wrong.target.binding.source.root_id = f.binding.source.root_id.clone();
+    assert!(f.repository.claim_handoff(wrong).await.is_err());
+    let mut stale = request.clone();
+    stale.target.start = Some(maka_event_log::checkpoints::Revision(Uuid::new_v4()));
+    assert_eq!(
+        f.repository.claim_handoff(stale).await.unwrap(),
+        ClaimResult::Conflict {
+            actual: Some(head.revision)
+        }
+    );
+    f.repository
+        .bind(
+            request.target.binding.source.clone(),
+            f.binding.identity.agent,
+        )
+        .await
+        .unwrap();
+    assert!(f.repository.claim_handoff(request).await.is_err());
+}
+
+#[tokio::test]
+async fn v3_repository_upgrade_retains_checkpoint_source_provenance() {
+    use maka_event_log::migration::Migration;
+    use sha2::Digest;
+    let directory = tempfile::tempdir().unwrap();
+    let db = rusqlite::Connection::open(directory.path().join("repository.sqlite")).unwrap();
+    db.execute_batch("PRAGMA application_id=1296257106; PRAGMA foreign_keys=ON;")
+        .unwrap();
+    maka_event_log::migration::run(
+        &db,
+        &[
+            Migration::sql(
+                1,
+                "checkpoint repository",
+                include_str!("../migrations/repository/0001_repository.sql"),
+            ),
+            Migration::sql(
+                2,
+                "shared checkpoint heads",
+                include_str!("../migrations/repository/0002_heads.sql"),
+            ),
+            Migration::sql(
+                3,
+                "checkpoint execution authority",
+                include_str!("../migrations/repository/0003_execution.sql"),
+            ),
+        ],
+    )
+    .unwrap();
+    let f = Fixture::new().await;
+    let identity = f.binding.identity.clone();
+    let receipt = SessionRepository::commit(&f.repository, f.commit(), f.verified())
+        .await
+        .unwrap();
+    let CommitReceipt::Published { head } = receipt else {
+        panic!()
+    };
+    db.execute(
+        "INSERT INTO checkpoint_repository_sessions VALUES(?,?)",
+        rusqlite::params![identity.session.to_string(), identity.agent.to_string()],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO checkpoint_repository_sources VALUES(?,?,?)",
+        rusqlite::params![
+            hex::encode(sha2::Sha256::digest(
+                serde_json::to_vec(&f.binding.source).unwrap()
+            )),
+            serde_json::to_string(&f.binding.source).unwrap(),
+            identity.session.to_string()
+        ],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO checkpoint_repository_heads VALUES(?,?)",
+        rusqlite::params![
+            identity.session.to_string(),
+            serde_json::to_string(&head).unwrap()
+        ],
+    )
+    .unwrap();
+    drop(db);
+    let upgraded = FileRepository::open(directory.path()).unwrap();
+    let retained = upgraded.read_head(identity).await.unwrap().unwrap();
+    assert_eq!(retained.binding, f.binding);
+    assert_eq!(retained.head, head);
+}
+
+#[tokio::test]
+async fn handoff_bootstrap_cannot_recover_a_preexisting_unrelated_session() {
+    use maka_event_log::{
+        root::{RootNamespaces, RootOwner},
+        root_store::RootStore,
+    };
+    let f = Fixture::new().await;
+    let grant = f.grant().await;
+    let CommitReceipt::Published { head } =
+        ExecutionAuthority::commit(&f.repository, grant.clone(), f.commit(), f.verified())
+            .await
+            .unwrap()
+    else {
+        panic!()
+    };
+    Execution::attach(Arc::new(f.repository.clone()), grant)
+        .await
+        .unwrap()
+        .stop(&DrainedEnvironment::default())
+        .await
+        .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let namespaces = RootNamespaces {
+        ownership: directory.path().join("owners"),
+        control: directory.path().join("control"),
+    };
+    let root = Arc::new(RootOwner::create(&directory.path().join("root"), &namespaces).unwrap());
+    let mut claim = f.claim();
+    claim.start = Some(head.revision);
+    claim.binding.source.root_id = root.root_id().into();
+    claim.binding.source.session = "already-here".into();
+    let old = RootStore::open(root.clone(), maka_event_log::ROOT_MIGRATIONS)
+        .await
+        .unwrap();
+    old.create_session("already-here", "existing", &serde_json::json!({}), 1)
+        .await
+        .unwrap();
+    old.close().await.unwrap();
+    let target = granted(
+        f.repository
+            .claim_handoff(HandoffClaim {
+                source: f.binding.clone(),
+                target: claim,
+            })
+            .await
+            .unwrap(),
+    );
+    let execution = Execution::attach(Arc::new(f.repository.clone()), target)
+        .await
+        .unwrap();
+    let storage = f
+        .repository
+        .storage(f.binding.identity.agent)
+        .unwrap()
+        .with_execution(execution)
+        .unwrap();
+    let result = RootStore::open_with_checkpoint_storage(
+        root,
+        maka_event_log::ROOT_MIGRATIONS,
+        Some(storage),
+    )
+    .await;
+    assert!(matches!(result,Err(ref e) if e.to_string().contains("lacks a committed activation")));
 }

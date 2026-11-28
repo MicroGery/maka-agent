@@ -100,6 +100,18 @@ pub(in crate::root_store) async fn configure(
     });
     let agent = log.connection.run(move |db| {
         let tx = db.unchecked_transaction()?;
+        if let Some(Configuration::Executing { grant, .. }) = &expected
+            && grant.handoff.is_some() {
+            let occupied: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_control WHERE id=?1) OR EXISTS(SELECT 1 FROM session_creations WHERE session_id=?1)",
+                [&grant.binding.source.session], |r| r.get(0))?;
+            let activated: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM checkpoint_handoffs WHERE json_extract(request_json,'$.grant.activation')=? AND activated_operation IS NOT NULL)",
+                [grant.activation.to_string()], |r| r.get(0))?;
+            if occupied && !activated {
+                return Err(invalid("handoff target Session lacks a committed activation"));
+            }
+        }
         let current: Option<String> = tx.query_row("SELECT configuration_json FROM checkpoint_repository_settings WHERE singleton=1", [], |r|r.get(0)).optional()?;
         let configuration = match current {
             Some(json) => {
@@ -204,7 +216,10 @@ pub(super) async fn head(
     match repository.lookup(source, authority(log)?.agent()).await? {
         Some(binding) => {
             let bound = repository.read_head(binding.identity.clone()).await?;
-            if bound.as_ref().is_some_and(|bound| bound.binding != binding) {
+            if bound
+                .as_ref()
+                .is_some_and(|bound| bound.binding.identity != binding.identity)
+            {
                 return Err(invalid("checkpoint logical Session binding differs"));
             }
             Ok(bound.map(|bound| bound.head))

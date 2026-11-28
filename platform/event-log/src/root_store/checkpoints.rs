@@ -26,6 +26,7 @@ use crate::checkpoints::{
 };
 use std::future::Future;
 pub(crate) mod authority;
+pub mod handoff;
 mod journal;
 pub(in crate::root_store) mod load;
 mod local;

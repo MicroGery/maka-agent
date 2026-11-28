@@ -20,6 +20,49 @@
 // Generated from Rust runtime schemas. Run npm run schema:generate -w @maka-agent/plugin-sdk.
 import type * as Runtime from './runtime.js';
 
+/**
+ * Hierarchical, stable source keys. Display aliases never become data identities.
+ */
+export type AgentActivateCheckpointInput_InstanceId = string[];
+export type AgentActivateCheckpointInput_Transport = 'local' | 'remote';
+export type AgentActivateCheckpointInput_RecoveryProtocol = 'journal_v1';
+/**
+ * Session sandbox policy. Full access disables isolation and permits Computer Use
+ * without additional application, browser or audio consent.
+ */
+export type AgentActivateCheckpointInput_AgentWorkspaceAccess =
+  | 'read_only'
+  | 'workspace_write'
+  | 'danger_full_access';
+/**
+ * The next turn's choice, independent of an already admitted execution.
+ * Model revisions are resolved afresh; preferences never grant execution authority.
+ */
+export type AgentActivateCheckpointInput_AgentBackendPreference =
+  | {
+      kind: 'model';
+      connectionId: string;
+      modelId: string;
+      serviceTier?: string | null;
+      thinkingLevel?: AgentActivateCheckpointInput_ThinkingLevel | null;
+    }
+  | {
+      kind: 'executor';
+      selection: AgentActivateCheckpointInput_AgentExecutorSelection;
+    };
+export type AgentActivateCheckpointInput_ThinkingLevel =
+  | 'off'
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max'
+  | 'ultra';
+/**
+ * Runtime-native effort, not a Host model's closed reasoning enum.
+ */
+export type AgentActivateCheckpointInput_ExecutorEffort = string;
 export type AgentChangeMemoryInput_MemoryScope =
   | {
       kind: 'personal';
@@ -922,6 +965,11 @@ export type AgentPendingMemoriesOutput_MemoryTemporal =
       end?: number | null;
     };
 export type AgentPredictNextMessageInput_AgentPredictionTrigger = 'live' | 'catch_up';
+export type AgentPrepareCheckpointOutput_AgentCheckpointWorkspaceConsistency =
+  | 'caller_confirmed_quiescent'
+  | 'unverified';
+export type AgentPrepareCheckpointOutput_AgentCheckpointWorkspaceWarning =
+  'external_writers_not_fenced';
 export type AgentPresetOutput_PresetRevision = number;
 export type AgentPresetOutput_ThinkingLevel =
   | 'off'
@@ -2906,6 +2954,27 @@ export type TerminalReadDisplayOutput_Color =
 
 export interface ServiceMethods {
   agent: {
+    activateCheckpoint: {
+      mode: 'mutation';
+      input: {
+        sessionId: string;
+        preparation: AgentActivateCheckpointInput_RecoveryRef;
+        preparedInput: AgentActivateCheckpointInput_AgentCheckpointPrepare;
+        title: string;
+        permissions: AgentActivateCheckpointInput_AgentWorkspacePermissions;
+        backend: AgentActivateCheckpointInput_AgentBackendPreference;
+        /**
+         * Explicit target capabilities; source tool bindings and credentials are never adopted.
+         */
+        tools: string[];
+        acceptExternalWritersRisk: boolean;
+      };
+      output: {
+        session: Runtime.AgentSession;
+        logicalSessionId: string;
+        activation: string;
+      };
+    };
     askQuickQuestion: {
       mode: 'mutation';
       input: {
@@ -4041,6 +4110,25 @@ export interface ServiceMethods {
         sourceTurnId: string;
         policyRevision: number;
         suggestion?: string | null;
+      };
+    };
+    prepareCheckpoint: {
+      mode: 'mutation';
+      /**
+       * Prepare exactly the checkpoint selected by the target Host's execution grant.
+       * No live Session or execution is created by this operation.
+       */
+      input: {
+        sessionId: string;
+        parent: string;
+      };
+      output: {
+        operation: string;
+        sessionId: string;
+        logicalSessionId: string;
+        head: AgentPrepareCheckpointOutput_AgentHistoryCheckpointHead;
+        path: string;
+        workspace: AgentPrepareCheckpointOutput_AgentCheckpointWorkspaceSnapshot | null;
       };
     };
     preset: {
@@ -5730,6 +5818,55 @@ export interface ServiceMethods {
     };
   };
 }
+export interface AgentActivateCheckpointInput_RecoveryRef {
+  source: AgentActivateCheckpointInput_DeploymentRef;
+  namespace: AgentActivateCheckpointInput_InstanceId;
+  export: string;
+  method: string;
+  operation: string;
+  fingerprint: string;
+  contract: AgentActivateCheckpointInput_RecoveryContract;
+  recovery: AgentActivateCheckpointInput_RecoveryProtocol;
+}
+export interface AgentActivateCheckpointInput_DeploymentRef {
+  stateDomain: string;
+  deployment: string;
+  revision: number;
+}
+/**
+ * Contract identity for a journal lookup. The original request retains the
+ * complete contract; a receipt carries only its digest.
+ */
+export interface AgentActivateCheckpointInput_RecoveryContract {
+  name: string;
+  version: number;
+  transport: AgentActivateCheckpointInput_Transport;
+  digest: string;
+}
+/**
+ * Prepare exactly the checkpoint selected by the target Host's execution grant.
+ * No live Session or execution is created by this operation.
+ */
+export interface AgentActivateCheckpointInput_AgentCheckpointPrepare {
+  sessionId: string;
+  parent: string;
+}
+export interface AgentActivateCheckpointInput_AgentWorkspacePermissions {
+  access: AgentActivateCheckpointInput_AgentWorkspaceAccess;
+  requestPermissions: boolean;
+}
+export interface AgentActivateCheckpointInput_AgentExecutorSelection {
+  executor: string;
+  settings: AgentActivateCheckpointInput_ExecutorSettings;
+}
+/**
+ * Executor-owned model selection, independent of Host model connections.
+ */
+export interface AgentActivateCheckpointInput_ExecutorSettings {
+  model?: string | null;
+  thinkingLevel?: AgentActivateCheckpointInput_ExecutorEffort | null;
+  runtime?: string | null;
+}
 /**
  * Most recent discovery association added after a Bot message was published.
  */
@@ -6629,6 +6766,19 @@ export interface AgentPendingMemoriesOutput_MemoryMetadata {
   kind: AgentPendingMemoriesOutput_MemoryKind;
   statement: AgentPendingMemoriesOutput_MemoryStatement;
   temporal: AgentPendingMemoriesOutput_MemoryTemporal;
+}
+export interface AgentPrepareCheckpointOutput_AgentHistoryCheckpointHead {
+  revision: string;
+  manifest: AgentPrepareCheckpointOutput_AgentHistoryCheckpointObject;
+}
+export interface AgentPrepareCheckpointOutput_AgentHistoryCheckpointObject {
+  digest: string;
+  bytes: number;
+}
+export interface AgentPrepareCheckpointOutput_AgentCheckpointWorkspaceSnapshot {
+  consistency: AgentPrepareCheckpointOutput_AgentCheckpointWorkspaceConsistency;
+  warning: AgentPrepareCheckpointOutput_AgentCheckpointWorkspaceWarning;
+  inventory: AgentPrepareCheckpointOutput_AgentHistoryCheckpointObject;
 }
 export interface AgentPresetOutput_PresetDetail {
   preset: AgentPresetOutput_Preset;

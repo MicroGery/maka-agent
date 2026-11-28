@@ -97,19 +97,22 @@ pub(crate) fn head(
     db: &Connection,
     identity: &SessionIdentity,
 ) -> Result<Option<BoundHead>, StoreError> {
-    let Some(binding) = binding_for(db, identity)? else {
-        return Ok(None);
-    };
-    let json: Option<String> = db
+    let row: Option<(String, String, String)> = db
         .query_row(
-            "SELECT head_json FROM checkpoint_repository_heads WHERE session_id=?",
+            "SELECT s.agent_id,b.source_json,h.head_json FROM checkpoint_repository_heads h JOIN checkpoint_repository_sessions s USING(session_id) JOIN checkpoint_repository_sources b ON b.source_key=h.source_key AND b.session_id=h.session_id WHERE h.session_id=?",
             [identity.session.to_string()],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    json.map(|json| {
+    row.map(|(agent, source, json)| {
+        if agent != identity.agent.to_string() {
+            return Err(invalid("checkpoint Session agent binding differs"));
+        }
         Ok(BoundHead {
-            binding,
+            binding: Binding {
+                identity: identity.clone(),
+                source: serde_json::from_str(&source)?,
+            },
             head: serde_json::from_str(&json)?,
         })
     })
@@ -170,8 +173,8 @@ pub(crate) fn commit_in(
             manifest: request.manifest.clone(),
         };
         tx.execute(
-            "INSERT INTO checkpoint_repository_heads VALUES(?,?) ON CONFLICT(session_id) DO UPDATE SET head_json=excluded.head_json",
-            params![request.binding.identity.session.to_string(), serde_json::to_string(&head)?],
+            "INSERT INTO checkpoint_repository_heads (session_id,head_json,source_key) VALUES(?,?,?) ON CONFLICT(session_id) DO UPDATE SET head_json=excluded.head_json,source_key=excluded.source_key",
+            params![request.binding.identity.session.to_string(), serde_json::to_string(&head)?, request.binding.source.key()?],
         )?;
         CommitReceipt::Published { head }
     };

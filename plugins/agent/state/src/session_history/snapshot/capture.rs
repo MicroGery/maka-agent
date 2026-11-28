@@ -22,6 +22,7 @@ pub(super) struct Capture(
     pub HistoryNamespace,
     pub CaptureRequest,
     pub Option<maka_event_log::root_store::SessionRevisionGuard>,
+    pub Option<crate::SessionQuiescenceGuard>,
 );
 impl Statement for Capture {
     type Value = ContentRef;
@@ -45,6 +46,28 @@ impl Statement for Capture {
             guard.validate(c)?;
             super::super::fork::validate_current(c, &self.0, &self.1.cut)?;
         }
+        let mut continuation = if let Some(guard) = &self.3 {
+            guard.validate(c)?;
+            // Read source relationships in the same transaction as the exact cut.
+            // Exclude even archived children; their state is outside this archive.
+            let dependent: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM agent_rooms WHERE owner=?1 AND session=?2)
+                OR EXISTS(SELECT 1 FROM agent_room_members WHERE member_session=?2)
+                OR EXISTS(SELECT 1 FROM agent_session_values WHERE session=?2)
+                OR EXISTS(SELECT 1 FROM agent_session_loaded_tools WHERE session=?2)
+                OR EXISTS(SELECT 1 FROM session_control WHERE json_extract(configuration,'$.parentSessionId')=?2)
+                OR EXISTS(SELECT 1 FROM agent_catalog_controls WHERE owner=?1 AND
+                  (session=?2 AND (json_extract(lineage,'$.origin') IS NOT NULL OR json_extract(lineage,'$.branch') IS NOT NULL) OR
+                   json_extract(lineage,'$.origin.parent_session_id')=?2 OR
+                   json_extract(lineage,'$.branch.parent_session_id')=?2))
+                OR EXISTS(SELECT 1 FROM session_control WHERE id=?2 AND
+                  (archived=1 OR json_extract(configuration,'$.parentSessionId') IS NOT NULL))",
+                params![owner, self.0.session], |r| r.get(0))?;
+            (!dependent)
+                .then_some(maka_agent_facts::history_snapshot::Continuation::OrdinaryNativeV1)
+        } else {
+            None
+        };
         super::super::sql::validate_cut(c, &self.0.owner, &self.0.session, &self.1.cut)?;
         let mut builder = Builder::new(c, self.1.id);
         let mut admissions = std::collections::BTreeMap::new();
@@ -58,6 +81,35 @@ impl Statement for Capture {
             while let Some(row) = rows.next()? {
                 let run = super::super::sql::identity(row.get(0)?)?;
                 let source = super::super::sql::run_source(c, &self.0, run)?;
+                if !matches!(
+                    source.spec.backend,
+                    maka_agent_facts::durable::BackendSpec::Model { .. }
+                        | maka_agent_facts::durable::BackendSpec::Historical {}
+                ) || matches!(
+                    source.spec.trigger,
+                    maka_agent_facts::durable::Trigger::Goal { .. }
+                ) {
+                    continuation = None;
+                }
+                if continuation.is_some()
+                    && matches!(
+                        source.spec.backend,
+                        maka_agent_facts::durable::BackendSpec::Historical {}
+                    )
+                {
+                    if let maka_agent_facts::durable::RunOrigin::Imported { source: reference } =
+                        &source.spec.origin
+                    {
+                        pin(c, self.1.id, reference, Some(run))?;
+                        let inherited: Manifest =
+                            metrics_metadata::original(c, self.1.id, run, reference)?;
+                        if inherited.continuation.is_none() {
+                            continuation = None;
+                        }
+                    } else {
+                        continuation = None;
+                    }
+                }
                 let sequence = read_u64(row, 1)?;
                 admissions.insert(
                     run,
@@ -260,9 +312,10 @@ impl Statement for Capture {
             }
         }
         super::positions::capture(c, &self.0, &self.1.cut, &mut builder)?;
-        let manifest = builder.finish(Origin::Canonical {
+        let mut manifest = builder.finish(Origin::Canonical {
             cut: self.1.cut.clone(),
         })?;
+        manifest.continuation = continuation;
         let blob = ContentBlob::json(&manifest)?;
         let manifest_id = blob.store(c)?;
         c.execute(
@@ -374,6 +427,7 @@ impl<'a> Builder<'a> {
             version: SNAPSHOT_VERSION,
             id: self.id,
             origin,
+            continuation: None,
             inventory: self.previous,
             objects: objects
                 .checked_add(1)

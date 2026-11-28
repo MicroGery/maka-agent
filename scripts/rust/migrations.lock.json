@@ -26,6 +26,10 @@
         "version": 65,
         "sha384": "c16d8e6b21c6b390ec5e4547f5357c0ac20c57b60d5d6c8a2c1c275801f24dfcec18b7d3720d4648f81d5d8b00c13d3a"
       },
+      "platform/event-log/migrations/0068_checkpoint_handoff.sql": {
+        "version": 68,
+        "sha384": "468f3ef52787bacff7909063a3b4c2dff9373e07d6c9b1d4a7e4deaade6511132ac93d7cff18d298e8ca7009a7a61b9b"
+      },
       "plugins/agent/state/migrations/0002_agent.sql": {
         "version": 2,
         "sha384": "cc1d058e9b871d3ecdb844b7cd525dfa695cadbf0a70c2133def97d2f527089a198d3d433b0daa78bf214cf682a7f0c2"
@@ -279,6 +283,10 @@
       "platform/event-log/migrations/repository/0003_execution.sql": {
         "version": 3,
         "sha384": "3960aa8017e95726dbd9d162788f681b8e86d0b13e67ddf2d01ad2a24b3ec974f59f72d9deca5a80357fee307afec32a"
+      },
+      "platform/event-log/migrations/repository/0004_handoff.sql": {
+        "version": 4,
+        "sha384": "1d6a0228a2222fa0d0b6b639990dc809c54326631bdc539f4afcd3555422d5c78724cad566a0b05980f5877acfb6116e"
       }
     },
     "settings": {
